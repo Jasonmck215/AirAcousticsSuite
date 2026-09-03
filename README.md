@@ -1,6 +1,6 @@
 # AirAcousticsSuite
 
-A Python GUI for automating the characterization of air-coupled acoustic and ultrasonic transducers. It communicates directly with lab equipment (oscilloscopes, function generators, and Arduino-controlled rotary stages) to run sweeps, capture bursts, and plot directivity.
+A Python GUI for automating the characterisation of air-coupled acoustic and ultrasonic transducers. It communicates directly with lab equipment (oscilloscopes, function generators, and Arduino-controlled rotary stages) to run sweeps, capture bursts, and plot directivity.
 
 Hardware Requirements
 To use the automated features, you need:
