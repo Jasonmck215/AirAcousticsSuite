@@ -84,6 +84,24 @@ def drive_voltage_row(parent):
     """Voltage empty by default — persisted via settings."""
     return two_column_entries(parent, "Voltage (V)", "Cycles", "", "5")
 
+def add_tooltip(widget, text):
+    tip = None
+    def on_enter(e):
+        nonlocal tip
+        if tip: return
+        x = widget.winfo_rootx() + 20
+        y = widget.winfo_rooty() + widget.winfo_height() + 4
+        tip = tk.Toplevel(widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(tip, text=text, background="#ffffcc", relief="solid", borderwidth=1,
+                 font=("Arial", 9), wraplength=260, justify="left", padx=6, pady=4).pack()
+    def on_leave(e):
+        nonlocal tip
+        if tip: tip.destroy(); tip = None
+    widget.bind("<Enter>", on_enter, add=True)
+    widget.bind("<Leave>", on_leave, add=True)
+
 def render_math(parent, tex_string, size=16, mode="Dark"):
     bg_color = '#2b2b2b' if mode == 'Dark' else '#e0e0e0'
     text_color = 'white' if mode == 'Dark' else 'black'
@@ -130,7 +148,7 @@ class AirAcousticsSuite(ctk.CTk):
         if len(sys.argv) > 1 and sys.argv[1].endswith('.aas'):
             self._load_on_start = sys.argv[1]
 
-        self.title("Air Acoustics Suite 1.0")
+        self.title("Air Acoustics Suite 1.2")
         self.geometry("1400x850")
         self.minsize(1200, 750)
         
@@ -147,8 +165,10 @@ class AirAcousticsSuite(ctk.CTk):
 
         self.last_burst_t      = None; self.last_burst_tx    = None; self.last_burst_mic   = None
         self.last_burst_fft_f  = None; self.last_burst_fft_m = None
-        self.last_sweep_data   = None; self.last_polar_data  = None
+        self.last_sweep_data   = None; self.last_polar_data  = None; self.last_polar_raw = None
         self.last_cwt_raw      = None; self.last_adv_raw     = None
+        self._sweep_overlays   = []
+        self.last_polar_bw3    = None; self.last_polar_bw6 = None
         self._last_fg_state    = None
         self.imp_data          = {}
 
@@ -274,6 +294,11 @@ class AirAcousticsSuite(ctk.CTk):
             "adv_avg_n": self.adv_avg_n.get() if hasattr(self, 'adv_avg_n') else "128",
             "adv_settle": self.adv_settle.get() if hasattr(self, 'adv_settle') else "0.5",
             
+            "sweep_acq": self.sweep_acq.get() if hasattr(self, 'sweep_acq') else "Normal",
+            "sweep_avg_n": self.sweep_avg_n.get() if hasattr(self, 'sweep_avg_n') else "16",
+            "polar_acq": self.pol_acq.get() if hasattr(self, 'pol_acq') else "Normal",
+            "polar_avg_n": self.pol_avg_n.get() if hasattr(self, 'pol_avg_n') else "16",
+            
             "burst_settle": self.burst_settle.get() if hasattr(self, 'burst_settle') else "0.2"
         }
 
@@ -310,6 +335,11 @@ class AirAcousticsSuite(ctk.CTk):
         if "adv_acq" in settings and hasattr(self, 'adv_acq'): _set(self.adv_acq, "adv_acq")
         if "adv_avg_n" in settings and hasattr(self, 'adv_avg_n'): _set(self.adv_avg_n, "adv_avg_n")
         if "adv_settle" in settings and hasattr(self, 'adv_settle'): _set(self.adv_settle, "adv_settle")
+        
+        if "sweep_acq" in settings and hasattr(self, 'sweep_acq'): _set(self.sweep_acq, "sweep_acq")
+        if "sweep_avg_n" in settings and hasattr(self, 'sweep_avg_n'): _set(self.sweep_avg_n, "sweep_avg_n")
+        if "polar_acq" in settings and hasattr(self, 'pol_acq'): _set(self.pol_acq, "polar_acq")
+        if "polar_avg_n" in settings and hasattr(self, 'pol_avg_n'): _set(self.pol_avg_n, "polar_avg_n")
         
         if "burst_settle" in settings and hasattr(self, 'burst_settle'): _set(self.burst_settle, "burst_settle")
         
@@ -361,9 +391,16 @@ class AirAcousticsSuite(ctk.CTk):
         self.file_menu.add_command(label="💾 Save (.aas)", command=self.save_aas)
         self.file_menu.add_command(label="💾 Save As (.aas)", command=self.save_as_aas)
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="📊 Export All Plots", command=lambda: self._export_workflow("Export Plots", save_plots=True))
-        self.file_menu.add_command(label="📉 Export All Raw Data", command=lambda: self._export_workflow("Export Raw Data", save_csvs=True))
-        self.file_menu.add_command(label="📦 Export All Data and .aas", command=lambda: self._export_workflow("Export All Data", save_plots=True, save_csvs=True, save_aas=True))
+        self.file_menu.add_command(label="🖼 Export Current Tab Plot (PNG)", command=self._export_current_tab_plot)
+        self.file_menu.add_command(label="📄 Export Current Tab Data (CSV)", command=self._export_current_tab_csv)
+        self.file_menu.add_command(label="📋 Export Report (.html)", command=self._export_report_only)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="📦 Export Everything (Plots + Data + Report + .aas)",
+            command=lambda: self._export_workflow("Export Everything", save_plots=True, save_csvs=True, save_aas=True),
+            font=("Arial", 11, "bold"))
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="📊 Export All Plots only", command=lambda: self._export_workflow("Export Plots", save_plots=True))
+        self.file_menu.add_command(label="📉 Export All Raw Data only (CSV)", command=lambda: self._export_workflow("Export Raw Data", save_csvs=True))
         
         def show_file_menu(event):
             try: self.file_menu.tk_popup(self.file_btn.winfo_rootx(), self.file_btn.winfo_rooty() + self.file_btn.winfo_height())
@@ -598,6 +635,26 @@ class AirAcousticsSuite(ctk.CTk):
                 return False # User canceled the action entirely
         return True
 
+    def _bind_keyboard_shortcuts(self):
+        _TAB_ACTIONS = {
+            "Burst Analysis":     "start_burst_thread",
+            "Resonance Sweep":    "start_sweep_thread",
+            "Polar Plot":         "start_polar_thread",
+            "Wavelet (CWT)":      "start_cwt_thread",
+            "STFT Spectrogram":   "start_adv_thread",
+        }
+        def _on_enter(event):
+            if isinstance(event.widget, (ctk.CTkEntry, tk.Entry, tk.Text, ctk.CTkTextbox)): return
+            if self.is_running: return
+            tab = self.tabs.get()
+            fn = _TAB_ACTIONS.get(tab)
+            if fn: getattr(self, fn)()
+        def _on_escape(event):
+            if self.is_running: self.is_running = False; self.log("Stopped by user (Escape).")
+        self.bind("<Return>", _on_enter)
+        self.bind("<KP_Enter>", _on_enter)
+        self.bind("<Escape>", _on_escape)
+
     def new_file(self):
         """Clears out all graphs, data caches, and starts a fresh blank canvas."""
         if not self.check_dirty_and_prompt("creating a new file"): return
@@ -605,10 +662,11 @@ class AirAcousticsSuite(ctk.CTk):
         # Reset internal data state
         self.last_burst_t = None; self.last_burst_tx = None; self.last_burst_mic = None
         self.last_burst_fft_f = None; self.last_burst_fft_m = None
-        self.last_sweep_data = None; self.last_polar_data = None
+        self.last_sweep_data = None; self.last_polar_data = None; self.last_polar_raw = None
         self.last_cwt_raw = None; self.last_adv_raw = None
         self._last_fg_state = None
-        self._polar_overlays = []
+        self._polar_overlays = []; self._sweep_overlays = []
+        self.last_polar_bw3 = None; self.last_polar_bw6 = None
         self._current_aas_file = None
         
         # Clear Dashboard
@@ -729,7 +787,7 @@ class AirAcousticsSuite(ctk.CTk):
         finally:
             try: self.fg.write("OUTPut1:STATe OFF")
             except: pass
-            self._set_ui_state(False)
+            self.is_running = False; self._set_ui_state(False)
             if on_complete: self.after(500, on_complete)
 
     def _update_level_meter(self, span_pct, is_clipping):
@@ -828,7 +886,8 @@ class AirAcousticsSuite(ctk.CTk):
             
         self._saved_pane_widths = {} # Clear the cache
         
-        self.unbind("<Escape>")
+        # Restore global stop-measurement binding after fullscreen exit
+        self.bind("<Escape>", lambda e: (setattr(self, 'is_running', False), self.log("Stopped by user (Escape).")) if self.is_running else None)
         # Force redraw of all canvases so they snap back to their grid sizes
         for fig in [self.fig_b, self.fig_sw, self.fig_p, self.fig_adv, self.fig_cwt, self.fig_imp]:
             try: fig.canvas.draw_idle()
@@ -1138,7 +1197,7 @@ class AirAcousticsSuite(ctk.CTk):
 
         def do_measure():
             btn_cal.configure(state="disabled", text="⏳ MEASURING...")
-            self.after(100, lambda: self._run_noise_calibration_worker(win, status_lbl, btn_cal))
+            threading.Thread(target=self._run_noise_calibration_worker, args=(win, status_lbl, btn_cal), daemon=True).start()
 
         btn_cal = ctk.CTkButton(win, text="▶ MEASURE BASELINE", fg_color="#2e7d32", command=do_measure)
         btn_cal.pack(pady=10)
@@ -1159,15 +1218,16 @@ class AirAcousticsSuite(ctk.CTk):
             # 3. Calculate baseline RMS
             self._calibrated_noise_rms = np.std(noise_volt)
             self._is_dirty = True
-            
-            status_lbl.configure(text=f"Measured Baseline: {self._calibrated_noise_rms*1000:.4f} mV RMS", text_color="#00E676")
-            self.log(f"Noise floor calibrated to: {self._calibrated_noise_rms:.6f} V RMS")
+            rms_val = self._calibrated_noise_rms
+            self.after(0, lambda: status_lbl.configure(text=f"Measured Baseline: {rms_val*1000:.4f} mV RMS", text_color="#00E676"))
+            self.after(0, lambda: self.log(f"Noise floor calibrated to: {rms_val:.6f} V RMS"))
         except Exception as e:
-            self.log(f"Calib fail: {e}")
-            status_lbl.configure(text="Measurement Failed!", text_color="#ff5252")
+            err = str(e)
+            self.after(0, lambda: self.log(f"Calib fail: {err}"))
+            self.after(0, lambda: status_lbl.configure(text="Measurement Failed!", text_color="#ff5252"))
         finally:
             if self.scope: self.scope.timeout = 5000
-            btn_cal.configure(state="normal", text="▶ RE-MEASURE")
+            self.after(0, lambda: btn_cal.configure(state="normal", text="▶ RE-MEASURE"))
 
     def _recompute_burst_with_noise(self):
         if self.last_burst_mic is None: return
@@ -1179,7 +1239,8 @@ class AirAcousticsSuite(ctk.CTk):
         
         # Calculate SNR accounting for system noise if calibration is high
         sig_std = np.std(mic_v)
-        snr_db = 20*np.log10(sig_std / noise_rms) if noise_rms > 0 else 0
+        eff_noise = np.sqrt(max(0, noise_rms**2 + self._calibrated_noise_rms**2))
+        snr_db = 20*np.log10(sig_std / eff_noise) if eff_noise > 0 else 0
         
         self.noise_info_lbl.configure(text=f"σ: {noise_rms:.6f} V [{'manual' if self._noise_override else 'auto'}]")
         self.snr_lbl.configure(text=f"{snr_db:.1f} dB SNR"); self.dash_snr.configure(text=f"{snr_db:.1f} dB SNR")
@@ -1232,6 +1293,7 @@ class AirAcousticsSuite(ctk.CTk):
         self._build_sidebar(self.sidebar)
         self.setup_results_tab(); self.setup_burst_tab(); self.setup_cwt_tab(); self.setup_adv_tab(); self.setup_sweep_tab(); self.setup_polar_tab(); self.setup_imp_tab()
         self.tabs.set("Burst Analysis")
+        self._bind_keyboard_shortcuts()
 
     def _build_sidebar(self, p):
         make_label(p, "SYSTEM CONTROL", size=16, bold=True, color=("black", "white")).pack(pady=(2, 4))
@@ -1275,10 +1337,12 @@ class AirAcousticsSuite(ctk.CTk):
         self.temp_entry = ctk.CTkEntry(cal_f, width=100, height=26)
         self.temp_entry.insert(0, "22.0")
         self.temp_entry.grid(row=1, column=0, pady=(2, 8), sticky="w")
-        
+        add_tooltip(self.temp_entry, "Ambient temperature used to calculate the speed of sound\nfor Time-of-Flight distance measurement.")
+
         self.humidity_entry = ctk.CTkEntry(cal_f, width=100, height=26)
         self.humidity_entry.insert(0, "50")
         self.humidity_entry.grid(row=1, column=1, pady=(2, 8), sticky="w")
+        add_tooltip(self.humidity_entry, "Relative humidity used alongside temperature to refine\nthe speed of sound calculation.")
 
         make_label(cal_f, "Mic Sens (mV/Pa)", size=11).grid(row=2, column=0, pady=0, sticky="w")
         make_label(cal_f, "Module Gain (dB)", size=11).grid(row=2, column=1, pady=0, sticky="w")
@@ -1286,10 +1350,12 @@ class AirAcousticsSuite(ctk.CTk):
         self.mic_sens = ctk.CTkEntry(cal_f, width=100, height=26)
         self.mic_sens.insert(0, "0.9")
         self.mic_sens.grid(row=3, column=0, pady=(2, 0), sticky="w")
-        
+        add_tooltip(self.mic_sens, "Microphone sensitivity in mV/Pa.\nConverts the measured scope voltage to acoustic pressure.")
+
         self.module_gain = ctk.CTkEntry(cal_f, width=100, height=26)
         self.module_gain.insert(0, "50.0")
         self.module_gain.grid(row=3, column=1, pady=(2, 0), sticky="w")
+        add_tooltip(self.module_gain, "Total gain (dB) of any amplifier or conditioning module\nbetween the microphone output and the scope input.")
         
         self.eff_sens_lbl = ctk.CTkLabel(p, text="", text_color=("gray60", "gray60"), font=("Arial", 11))
         self.eff_sens_lbl.pack(pady=(4, 6))
@@ -1317,6 +1383,7 @@ class AirAcousticsSuite(ctk.CTk):
         self.ref_dist_entry = ctk.CTkEntry(dist_f, width=100, height=26)
         self.ref_dist_entry.insert(0, "30.0")
         self.ref_dist_entry.grid(row=1, column=0, pady=(2, 0), sticky="w")
+        add_tooltip(self.ref_dist_entry, "Transducer-to-microphone separation in cm.\nUsed for Source Level and far-field calculations.")
         
         self.ref_dist_lock_var = ctk.StringVar(value="off")
         ctk.CTkCheckBox(dist_f, text="Override ToF", variable=self.ref_dist_lock_var, onvalue="on", offvalue="off", font=("Arial", 11)).grid(row=1, column=1, pady=(2, 0), sticky="w")
@@ -1360,7 +1427,9 @@ class AirAcousticsSuite(ctk.CTk):
         card_bw = ctk.CTkFrame(s_grid, fg_color=("#d6d6d6", "#333333"), corner_radius=10); card_bw.grid(row=0, column=1, padx=8, pady=8, sticky="nsew")
         self.dash_bw = ctk.CTkLabel(card_bw, text="-- kHz", font=("Arial", 24, "bold"), text_color=("#0277bd","#00B0FF")); self.dash_bw.pack(expand=True, side="bottom", pady=(0, 15))
         self.dash_bw_title = make_label(card_bw, "Bandwidth (-6dB)", size=12, color=("gray40","gray70"), bold=True); self.dash_bw_title.pack(expand=True, side="top", pady=(15, 0))
-        self.dash_q = add_card(s_grid, 0, 2, "Quality Factor (Q)", "--", ("#00c853","#00E676"))
+        _q_card = ctk.CTkFrame(s_grid, fg_color=("#d6d6d6", "#333333"), corner_radius=10); _q_card.grid(row=0, column=2, padx=8, pady=8, sticky="nsew")
+        self.dash_q = ctk.CTkLabel(_q_card, text="--", font=("Arial", 24, "bold"), text_color=("#00c853","#00E676")); self.dash_q.pack(expand=True, side="bottom", pady=(0, 15))
+        self.dash_q_title = make_label(_q_card, "Quality Factor (Q)", size=12, color=("gray40","gray70"), bold=True); self.dash_q_title.pack(expand=True, side="top", pady=(15, 0))
 
         f_polar = ctk.CTkFrame(self.tab_res, fg_color=("#e0e0e0", "#2b2b2b"), corner_radius=15); f_polar.grid(row=1, column=1, padx=(5, 10), pady=(5, 10), sticky="nsew")
         make_label(f_polar, "DIRECTIONAL METRICS", size=18, bold=True, color=("#388e3c","#a5d6a7")).pack(pady=(15, 5))
@@ -1379,6 +1448,8 @@ class AirAcousticsSuite(ctk.CTk):
         make_label(self.ctrl_burst, "BURST ANALYSIS", size=13, bold=True, color=("#e65100", "orange")).pack(pady=(8, 4))
         self.btn_run_burst = ctk.CTkButton(self.ctrl_burst, text="▶  RUN", fg_color=("#2e7d32", "green"), font=("Arial", 13, "bold"), command=self.start_burst_thread); self.btn_run_burst.pack(pady=(0, 4), padx=8, fill="x")
         self.burst_voltage, self.burst_cycles = drive_voltage_row(self.ctrl_burst)
+        add_tooltip(self.burst_voltage, "Peak-to-peak (Vpp) output voltage from the function generator to the TX transducer.")
+        add_tooltip(self.burst_cycles, "Number of sine cycles in each burst pulse.\nMore cycles carry more energy but create a longer pulse.")
 
         section_sep(self.ctrl_burst, "── FG Output Mode ──")
         self.burst_fg_mode = ctk.CTkSegmentedButton(self.ctrl_burst, values=["Burst", "Continuous", "Modulation"], command=self._on_fg_mode_change)
@@ -1391,11 +1462,15 @@ class AirAcousticsSuite(ctk.CTk):
 
         self.panel_burst = ctk.CTkFrame(self.ctrl_burst, fg_color="transparent"); section_sep(self.panel_burst, "── Burst Settings ──")
         self.burst_capture_time = labeled_entry(self.panel_burst, "FG On Duration (s)", "1.2"); self.burst_dwell = labeled_entry(self.panel_burst, "Dwell After Burst (s)", "0.5")
+        add_tooltip(self.burst_capture_time, "How long the FG stays ON during scope acquisition.\nMust be long enough for the scope to complete all its averages.\nIncrease if using high average counts.")
+        add_tooltip(self.burst_dwell, "Wait after the FG turns OFF before reading scope data back.\nAllows the transducer to ring down before the next measurement.")
         self.panel_cont = ctk.CTkFrame(self.ctrl_burst, fg_color="transparent"); section_sep(self.panel_cont, "── Continuous Settings ──")
         self.panel_mod = ctk.CTkFrame(self.ctrl_burst, fg_color="transparent"); section_sep(self.panel_mod, "── Modulation Settings ──")
         self.mod_type   = labeled_seg(self.panel_mod, "Mod Type", ["AM", "FM", "PM", "FSK"], "AM")
         self.mod_freq   = labeled_entry(self.panel_mod, "Mod Frequency (Hz)", "1000")
+        add_tooltip(self.mod_freq, "Rate at which the carrier signal is modulated.\nFor FSK this is the keying (switching) rate.")
         self.mod_depth  = labeled_entry(self.panel_mod, "AM Depth (%) / FM Dev (Hz)", "50")
+        add_tooltip(self.mod_depth, "AM: modulation depth as a percentage (0–100).\nFM: peak frequency deviation in Hz.\nPM: phase deviation in radians.")
         self.mod_wave   = labeled_seg(self.panel_mod, "Mod Waveform", ["Sine", "Square", "Ramp"], "Sine")
         self.mod_source = labeled_seg(self.panel_mod, "Mod Source", ["Internal", "External"], "Internal")
         self.panel_burst.pack(fill="x")
@@ -1403,18 +1478,31 @@ class AirAcousticsSuite(ctk.CTk):
         section_sep(self.ctrl_burst, "── Scope (Fixed CH1/CH2) ──")
         self.burst_acq   = labeled_seg(self.ctrl_burst, "Acquire Mode", ["Normal", "Average", "Peak"], "Average")
         self.burst_avg_n = labeled_entry(self.ctrl_burst, "Averages", "32")
+        add_tooltip(self.burst_avg_n, "Number of scope acquisitions to average.\nHigher values reduce noise but increase measurement time.")
         self.burst_settle = labeled_entry(self.ctrl_burst, "Pre-Trig Settle (s)", "0.1")
+        add_tooltip(self.burst_settle, "Time the FG stays ON before the scope begins digitizing.\nAllows the signal to stabilise before capture starts.")
         
         make_label(self.ctrl_burst, "↕️ TX/RX Vertical Spacing").pack(pady=(4, 0))
         self.burst_sep_slider = ctk.CTkSlider(self.ctrl_burst, from_=1.0, to=30.0, command=self._update_burst_separation)
         self.burst_sep_slider.set(4.0)
         self.burst_sep_slider.pack(fill="x", padx=15, pady=(0, 6))
 
-        section_sep(self.ctrl_burst, "── FFT Plot Range ──")
+        section_sep(self.ctrl_burst, "── FFT Options ──")
+        self.fft_window = labeled_seg(self.ctrl_burst, "Window Function", ["Hanning", "Hamming", "Blackman", "None"], "Hanning",
+                                      command=lambda _: self._replot_burst_fft())
+        self.fft_scale  = labeled_seg(self.ctrl_burst, "Y-Axis Scale", ["dB", "Linear"], "dB",
+                                      command=lambda _: self._replot_burst_fft())
         self.fft_fmin, self.fft_fmax = two_column_entries(self.ctrl_burst, "Min Freq (kHz)", "Max Freq (kHz)")
+        add_tooltip(self.fft_fmin, "Lower frequency limit of the FFT plot. Leave blank for auto.")
+        add_tooltip(self.fft_fmax, "Upper frequency limit of the FFT plot. Leave blank for auto.")
+        self.fft_fmin.bind("<Return>", lambda e: self._replot_burst_fft())
+        self.fft_fmax.bind("<Return>", lambda e: self._replot_burst_fft())
+        self.fft_fmin.bind("<FocusOut>", lambda e: self._replot_burst_fft())
+        self.fft_fmax.bind("<FocusOut>", lambda e: self._replot_burst_fft())
 
         section_sep(self.ctrl_burst, "── Ring-Down View ──")
         self.ringdown_ext = labeled_entry(self.ctrl_burst, "Extra Tail (ms)", "0.0")
+        add_tooltip(self.ringdown_ext, "Extra time added to the right edge of the burst plot\nto show more of the transducer ring-down.")
         ctk.CTkLabel(self.ctrl_burst, text="Extend plot right to see\nmore of the ring-down tail", font=("Arial", 9), text_color=("gray50","gray60"), justify="left").pack(padx=15, anchor="w")
 
         section_sep(self.ctrl_burst, "── Noise Floor ──")
@@ -1455,6 +1543,11 @@ class AirAcousticsSuite(ctk.CTk):
         if mode == "Burst": self.panel_burst.pack(fill="x")
         elif mode == "Continuous": self.panel_cont.pack(fill="x")
         elif mode == "Modulation": self.panel_mod.pack(fill="x")
+        tof_active = (mode == "Burst")
+        self.tof_note.configure(
+            text="✓ ToF distance active" if tof_active else "✗ ToF not available in this mode",
+            text_color=("#2e7d32", "#4caf50") if tof_active else ("#c62828", "#ff5252")
+        )
     def _on_burst_wave_change(self, selected): pass
 
     def setup_cwt_tab(self):
@@ -1471,10 +1564,16 @@ class AirAcousticsSuite(ctk.CTk):
         section_sep(self.ctrl_cwt, "── Scope Settings (RX) ──")
         self.cwt_acq   = labeled_seg(self.ctrl_cwt, "Acquire Mode", ["Normal", "Average", "Peak"], "Average")
         self.cwt_avg_n = labeled_entry(self.ctrl_cwt, "Averages", "128")
+        add_tooltip(self.cwt_avg_n, "Number of scope acquisitions to average.\nHigher values reduce noise but increase measurement time.")
         self.cwt_settle = labeled_entry(self.ctrl_cwt, "Pre-Trig Settle (s)", "0.5")
+        add_tooltip(self.cwt_settle, "Time the FG stays ON before the scope begins digitizing.\nAllows the signal to stabilise before capture starts.")
 
         section_sep(self.ctrl_cwt, "── Plot Boundaries ──"); self.cwt_fmin, self.cwt_fmax = two_column_entries(self.ctrl_cwt, "Min Freq (kHz)", "Max Freq (kHz)")
+        add_tooltip(self.cwt_fmin, "Lower frequency limit of the CWT spectrogram. Leave blank for auto.")
+        add_tooltip(self.cwt_fmax, "Upper frequency limit of the CWT spectrogram. Leave blank for auto.")
         section_sep(self.ctrl_cwt, "── Time Window ──"); self.cwt_pre, self.cwt_tail = two_column_entries(self.ctrl_cwt, "Pre-Peak (ms)", "Tail (ms)", "0.3", "1.0")
+        add_tooltip(self.cwt_pre, "Time shown before the signal envelope peak in the spectrogram.")
+        add_tooltip(self.cwt_tail, "Time shown after the signal envelope peak — captures the ring-down.")
         self.fig_cwt = plt.figure(figsize=(11, 4), facecolor="white"); self.ax_cwt = self.fig_cwt.add_subplot(111)
         self.canvas_cwt = FigureCanvasTkAgg(self.fig_cwt, master=pf); self.canvas_cwt.mpl_connect('pick_event', self._on_legend_pick); self.canvas_cwt.mpl_connect('button_press_event', self._on_plot_click)
         
@@ -1502,10 +1601,16 @@ class AirAcousticsSuite(ctk.CTk):
         section_sep(self.ctrl_adv, "── Scope Settings (RX) ──")
         self.adv_acq   = labeled_seg(self.ctrl_adv, "Acquire Mode", ["Normal", "Average", "Peak"], "Average")
         self.adv_avg_n = labeled_entry(self.ctrl_adv, "Averages", "128")
+        add_tooltip(self.adv_avg_n, "Number of scope acquisitions to average.\nHigher values reduce noise but increase measurement time.")
         self.adv_settle = labeled_entry(self.ctrl_adv, "Pre-Trig Settle (s)", "0.5")
+        add_tooltip(self.adv_settle, "Time the FG stays ON before the scope begins digitizing.\nAllows the signal to stabilise before capture starts.")
 
         section_sep(self.ctrl_adv, "── Plot Boundaries ──"); self.adv_fmin, self.adv_fmax = two_column_entries(self.ctrl_adv, "Min Freq (kHz)", "Max Freq (kHz)")
+        add_tooltip(self.adv_fmin, "Lower frequency limit of the STFT spectrogram. Leave blank for auto.")
+        add_tooltip(self.adv_fmax, "Upper frequency limit of the STFT spectrogram. Leave blank for auto.")
         section_sep(self.ctrl_adv, "── Time Window ──"); self.adv_pre, self.adv_tail = two_column_entries(self.ctrl_adv, "Pre-Peak (ms)", "Tail (ms)", "0.3", "1.0")
+        add_tooltip(self.adv_pre, "Time shown before the signal envelope peak in the spectrogram.")
+        add_tooltip(self.adv_tail, "Time shown after the signal envelope peak — captures the ring-down.")
         self.fig_adv = plt.figure(figsize=(11, 4), facecolor="white"); self.ax_adv = self.fig_adv.add_subplot(111)
         self.canvas_adv = FigureCanvasTkAgg(self.fig_adv, master=pf); self.canvas_adv.mpl_connect('pick_event', self._on_legend_pick); self.canvas_adv.mpl_connect('button_press_event', self._on_plot_click)
         
@@ -1528,19 +1633,34 @@ class AirAcousticsSuite(ctk.CTk):
         self.btn_run_sweep = ctk.CTkButton(self.ctrl_sweep, text="▶  START SWEEP", fg_color=("#2e7d32","green"), font=("Arial", 13, "bold"), command=self.start_sweep_thread); self.btn_run_sweep.pack(pady=(0,4), padx=8, fill="x")
         self.sweep_progress = ctk.CTkProgressBar(self.ctrl_sweep, height=10); self.sweep_progress.set(0); self.sweep_progress.pack(pady=(2,0), padx=10, fill="x")
         self.sweep_prog_lbl = ctk.CTkLabel(self.ctrl_sweep, text="Ready", font=("Arial", 10), text_color=("gray40","gray70")); self.sweep_prog_lbl.pack(pady=(0,4))
+        ctk.CTkButton(self.ctrl_sweep, text="Clear Plot", fg_color=("#b0bec5","#555"), text_color=("black","white"), command=self._clear_sweep_plot).pack(pady=(0,6), padx=8, fill="x")
         
         # FIX: Replaced the side-by-side Burst row with a single Continuous voltage entry
         self.sweep_voltage = labeled_entry(self.ctrl_sweep, "Drive Voltage (V)", "5")
+        add_tooltip(self.sweep_voltage, "Peak-to-peak (Vpp) output voltage from the function generator to the TX transducer.")
 
         section_sep(self.ctrl_sweep, "── Frequency Range ──")
         self.start_f, self.end_f = two_column_entries(self.ctrl_sweep, "Start (kHz)", "End (kHz)")
-        self.step_f = labeled_entry(self.ctrl_sweep, "Step (kHz)", "0.1")
-        self.sweep_spacing = labeled_seg(self.ctrl_sweep, "Frequency Spacing", ["Linear", "Log"], "Linear")
+        self.step_f_lbl = make_label(self.ctrl_sweep, "Step (kHz)"); self.step_f_lbl.pack()
+        self.step_f = ctk.CTkEntry(self.ctrl_sweep, width=120); self.step_f.insert(0, "0.1"); self.step_f.pack(pady=3)
+        add_tooltip(self.step_f, "Linear mode: frequency increment between each measurement step (kHz).\nLog mode: total number of evenly log-spaced frequency points.")
+        self.sweep_spacing = labeled_seg(self.ctrl_sweep, "Frequency Spacing", ["Linear", "Log"], "Linear",
+            command=lambda v: self.step_f_lbl.configure(text="Step (kHz)" if v == "Linear" else "No. of Points"))
         section_sep(self.ctrl_sweep, "── Waveform ──"); self.sweep_wave = labeled_seg(self.ctrl_sweep, "Waveform Type", ["Sine", "Square", "Triangle", "Ramp"], "Sine")
         section_sep(self.ctrl_sweep, "── Scope (RX: CH2) ──")
+        ctk.CTkButton(self.ctrl_sweep, text="⚡ Auto-Scale RX", fg_color=("#f57f17","#fbc02d"), text_color="black", font=("Arial", 11), height=24,
+                      command=lambda: self.smart_autoscale_rx(target_f_hz=float(self.start_f.get() or 40)*1000, target_v=self.sweep_voltage.get(), target_mode="Continuous")).pack(pady=(2,4), padx=8, fill="x")
+        self.sweep_acq   = labeled_seg(self.ctrl_sweep, "Acquire Mode", ["Normal", "Average", "Peak"], "Normal")
+        self.sweep_avg_n = labeled_entry(self.ctrl_sweep, "Averages", "16")
+        add_tooltip(self.sweep_avg_n, "Number of scope acquisitions to average at each frequency.\nHigher values reduce noise but increase sweep time.")
         self.sweep_meas  = labeled_seg(self.ctrl_sweep, "Measurement", ["RMS", "Peak", "Vpp"], "RMS")
         self.sweep_dwell = labeled_entry(self.ctrl_sweep, "Dwell Time (s)", "0.3")
-        section_sep(self.ctrl_sweep, "── Display ──"); self.sweep_yaxis = labeled_seg(self.ctrl_sweep, "Y Axis", ["SPL (dB)", "Pa RMS", "V RMS"], "SPL (dB)")
+        add_tooltip(self.sweep_dwell, "Wait between setting each new frequency and taking the measurement.\nIncrease if readings look noisy or inconsistent.")
+        section_sep(self.ctrl_sweep, "── Display ──")
+        self.sweep_yaxis = labeled_seg(self.ctrl_sweep, "Y Axis", ["SPL (dB)", "Pa RMS", "V RMS"], "SPL (dB)",
+                                       command=lambda _: self._replot_sweep())
+        section_sep(self.ctrl_sweep, "── Overlay ──")
+        self.sweep_overlay = labeled_seg(self.ctrl_sweep, "Overlay Mode", ["Replace", "Overlay"], "Replace")
         section_sep(self.ctrl_sweep, "── Bandwidth Thresholds ──"); self.bw_thresh_seg = labeled_seg(self.ctrl_sweep, "Show BW at", ["-3 dB", "-6 dB", "-10 dB", "-20 dB"], "-6 dB")
         ctk.CTkLabel(self.ctrl_sweep, text="The selected threshold will be shown\non the Results Dashboard.", font=("Arial", 9), text_color=("gray50","gray60"), justify="left").pack(padx=15, anchor="w")
 
@@ -1584,19 +1704,30 @@ class AirAcousticsSuite(ctk.CTk):
         
         # FIX: Replaced the side-by-side Burst row with a single Continuous voltage entry
         self.polar_voltage = labeled_entry(self.ctrl_polar, "Drive Voltage (V)", "5")
+        add_tooltip(self.polar_voltage, "Peak-to-peak (Vpp) output voltage from the function generator to the TX transducer.")
         
         section_sep(self.ctrl_polar, "── Signal ──"); self.pol_f = labeled_entry(self.ctrl_polar, "Frequency (kHz)", "")
         self.polar_wave = labeled_seg(self.ctrl_polar, "Waveform Type", ["Sine", "Square", "Triangle", "Ramp"], "Sine")
         section_sep(self.ctrl_polar, "── Angle Range ──"); self.pol_start, self.pol_end = two_column_entries(self.ctrl_polar, "Start (°)", "End (°)", "-90", "90")
         self.pol_step = labeled_entry(self.ctrl_polar, "Step Size (°)", "5")
+        add_tooltip(self.pol_step, "Angular increment between motor positions.\nSmaller values give finer directivity detail but increase total scan time.")
         self.pol_dir = labeled_seg(self.ctrl_polar, "Scan Direction", ["Start→End", "End→Start", "Both"], "Start→End")
-        section_sep(self.ctrl_polar, "── Scope (RX: CH2) ──"); self.pol_dwell = labeled_entry(self.ctrl_polar, "Dwell per Step (s)", "1.2")
-        self.pol_range   = labeled_seg(self.ctrl_polar, "Plot Range (dB)", ["-20", "-30", "-40", "-60"], "-30")
+        section_sep(self.ctrl_polar, "── Scope (RX: CH2) ──")
+        ctk.CTkButton(self.ctrl_polar, text="⚡ Auto-Scale RX", fg_color=("#f57f17","#fbc02d"), text_color="black", font=("Arial", 11), height=24,
+                      command=lambda: self.smart_autoscale_rx(target_f_hz=float(self.pol_f.get() or 40)*1000, target_v=self.polar_voltage.get(), target_mode="Continuous")).pack(pady=(2,4), padx=8, fill="x")
+        self.pol_dwell = labeled_entry(self.ctrl_polar, "Dwell per Step (s)", "1.2")
+        add_tooltip(self.pol_dwell, "Wait per angle step between the motor command and the measurement.\nMust be long enough for the motor to reach and settle at the new position.")
+        self.pol_acq = labeled_seg(self.ctrl_polar, "Acquire Mode", ["Normal", "Average", "Peak"], "Normal")
+        self.pol_avg_n = labeled_entry(self.ctrl_polar, "Averages", "16")
+        add_tooltip(self.pol_avg_n, "Number of scope acquisitions to average at each angle.\nHigher values reduce noise but increase scan time.")
+        self.pol_range   = labeled_seg(self.ctrl_polar, "Plot Range (dB)", ["-20", "-30", "-40", "-60"], "-30",
+                                       command=lambda _: self._replot_polar())
         self.pol_overlay = labeled_seg(self.ctrl_polar, "Overlay Mode", ["Replace", "Overlay"], "Replace")
         
         section_sep(self.ctrl_polar, "── Theoretical Prediction ──")
         self.pred_geom = labeled_seg(self.ctrl_polar, "Geometry", ["Circular", "Rectangular"], "Circular", command=lambda _: self.update_polar_prediction())
         self.pred_dim = labeled_entry(self.ctrl_polar, "Dimension (Diameter/Width) mm", "10.0")
+        add_tooltip(self.pred_dim, "Physical aperture size of the transducer.\nDiameter for circular geometry, width for rectangular.")
         self.pred_dim.bind("<KeyRelease>", lambda e: self.update_polar_prediction())
         
         mode_f = ctk.CTkFrame(self.ctrl_polar, fg_color="transparent")
@@ -1607,9 +1738,11 @@ class AirAcousticsSuite(ctk.CTk):
         self.pred_mode_n = ctk.CTkEntry(mode_f, width=100); self.pred_mode_n.insert(0, "0")
         self.pred_mode_n.bind("<KeyRelease>", lambda e: self.update_polar_prediction())
         self.pred_mode_n.grid(row=1, column=0, padx=5, pady=3)
+        add_tooltip(self.pred_mode_n, "Radial mode index for the Bessel function pattern model.\n0 = fundamental (piston-like, no radial nodes).")
         self.pred_mode_m = ctk.CTkEntry(mode_f, width=100); self.pred_mode_m.insert(0, "0")
         self.pred_mode_m.bind("<KeyRelease>", lambda e: self.update_polar_prediction())
         self.pred_mode_m.grid(row=1, column=1, padx=5, pady=3)
+        add_tooltip(self.pred_mode_m, "Angular mode index.\n0 = axisymmetric (no rotational variation in the pattern).")
         
         ctk.CTkLabel(self.ctrl_polar, text="Note: n=0, m=0 is the fundamental clamped mode.", font=("Arial", 10), text_color=("gray50", "gray60")).pack(anchor="w", padx=15, pady=(0, 4))
         
@@ -1635,6 +1768,14 @@ class AirAcousticsSuite(ctk.CTk):
         self._polar_overlays = []
         self._last_polar_al = None
         self._last_polar_vl = None
+
+    def _clear_sweep_plot(self):
+        self.last_sweep_data = None
+        self._sweep_overlays = []
+        self._last_sw_bw_kwargs = {}
+        self.ax_sw.clear(); self.ax_sw.grid(True, alpha=0.3)
+        self.clear_bw_plot()
+        self.canvas_sw.draw()
 
     def _clear_polar(self):
         # FIX: Also clear the underlying raw data array so it doesn't accidentally get exported later, and trip the dirty flag
@@ -1664,6 +1805,8 @@ class AirAcousticsSuite(ctk.CTk):
         
         section_sep(self.ctrl_imp, "── Plot Range ──")
         self.imp_fmin, self.imp_fmax = two_column_entries(self.ctrl_imp, "Min Freq (kHz)", "Max Freq (kHz)")
+        add_tooltip(self.imp_fmin, "Lower frequency limit of the impedance plot. Leave blank to show all loaded data.")
+        add_tooltip(self.imp_fmax, "Upper frequency limit of the impedance plot. Leave blank to show all loaded data.")
         ctk.CTkButton(self.ctrl_imp, text="Apply Range", fg_color=("#455a64", "#607d8b"), font=("Arial", 11), height=24, command=self.update_imp_plot).pack(pady=(0, 6), padx=8, fill="x")
         
         section_sep(self.ctrl_imp, "── Display Settings ──")
@@ -1779,7 +1922,7 @@ class AirAcousticsSuite(ctk.CTk):
     def _fg_set_continuous(self, waveform="SINusoid", voltage=None):
         self.fg.write("SOURCE1:BURST:STATE OFF"); self.fg.write("SOURCE1:SWEEP:STATE OFF")
         self.fg.write("SOURCE1:AM:STATE OFF"); self.fg.write("SOURCE1:FM:STATE OFF"); self.fg.write("SOURCE1:PM:STATE OFF")
-        self.fg.write(f"SOURCE1:FUNCTION {waveform}"); self.fg.write(f"SOURCE1:VOLTAGE {voltage or '20.0'}")
+        self.fg.write(f"SOURCE1:FUNCTION {waveform}"); self.fg.write(f"SOURCE1:VOLTAGE {voltage or '1.0'}")
 
     def _fg_set_burst(self, freq_hz, voltage, cycles, waveform="SINusoid", trig="TRIGgered", idle="0V"):
         self.fg.write("OUTPut1:STATe OFF"); self.fg.write("SOURCE1:SWEEP:STATE OFF")
@@ -1819,12 +1962,12 @@ class AirAcousticsSuite(ctk.CTk):
         self.scope.write(f":ACQuire:TYPE {scpi}")
         if scpi == "AVERage": self.scope.write(f":ACQuire:COUNt {averages}")
 
-    def _scope_measure_cw(self, channel, meas_type="RMS"):
-        self.scope.write(":RUN")
+    def _scope_measure_cw(self, channel, meas_type="RMS", run=True):
+        if run: self.scope.write(":RUN")
         mm = {"RMS":(f":MEASure:VRMS DISPlay,AC,{channel}", f":MEASure:VRMS? DISPlay,AC,{channel}"),
               "Peak":(f":MEASure:VPEak {channel}", f":MEASure:VPEak? {channel}"),
               "Vpp":(f":MEASure:VPP {channel}", f":MEASure:VPP? {channel}")}
-        sc, qc = mm.get(meas_type, mm["RMS"]); self.scope.write(sc); time.sleep(0.35)
+        sc, qc = mm.get(meas_type, mm["RMS"]); self.scope.write(sc); time.sleep(0.05)
         try: return float(self.scope.query(qc).strip())
         except: return 0.0
 
@@ -1860,6 +2003,7 @@ class AirAcousticsSuite(ctk.CTk):
                  'acq_mode': self.burst_acq.get(), 'avg_n': int(self.burst_avg_n.get()), 'settle': float(self.burst_settle.get()),
                  'capture_t': float(self.burst_capture_time.get()), 'dwell': float(self.burst_dwell.get()),
                  'fft_min': float(fmn)*1000 if fmn else None, 'fft_max': float(fmx)*1000 if fmx else None,
+                 'fft_window': self.fft_window.get(), 'fft_scale': self.fft_scale.get(),
                  't': float(self.temp_entry.get()), 'humidity': float(self.humidity_entry.get()),
                  'eff_v_pa': self._effective_sens_v_pa(), 'dist_lock': self.ref_dist_lock_var.get() == "on",
                  'ref_dist': float(self.ref_dist_entry.get()), 'ringdown_ext': float(self.ringdown_ext.get())/1000 if self.ringdown_ext.get() else 0.0,
@@ -1875,7 +2019,8 @@ class AirAcousticsSuite(ctk.CTk):
             p = {'s': float(self.start_f.get())*1000, 'e': float(self.end_f.get())*1000, 'st': float(self.step_f.get())*1000,
                  'eff_v_pa': self._effective_sens_v_pa(), 'waveform': self.sweep_wave.get(), 'voltage': self.sweep_voltage.get(),
                  'meas': self.sweep_meas.get(), 'dwell': float(self.sweep_dwell.get()), 'spacing': self.sweep_spacing.get(),
-                 'yaxis': self.sweep_yaxis.get(), 'bw_highlight': self.bw_thresh_seg.get()}
+                 'yaxis': self.sweep_yaxis.get(), 'bw_highlight': self.bw_thresh_seg.get(),
+                 'acq_mode': self.sweep_acq.get(), 'avg_n': int(self.sweep_avg_n.get() or 16)}
         except ValueError: return self.log("Error: Missing/invalid inputs.")
         threading.Thread(target=self._sweep_worker, args=(p,), daemon=True).start()
 
@@ -1884,7 +2029,8 @@ class AirAcousticsSuite(ctk.CTk):
         try:
             p = {'freq': float(self.pol_f.get())*1000, 'waveform': self.polar_wave.get(), 'voltage': self.polar_voltage.get(),
                  'start': int(float(self.pol_start.get())), 'end': int(float(self.pol_end.get())), 'step': int(float(self.pol_step.get())),
-                 'dir': self.pol_dir.get(), 'dwell': float(self.pol_dwell.get()), 'overlay': self.pol_overlay.get()}
+                 'dir': self.pol_dir.get(), 'dwell': float(self.pol_dwell.get()), 'overlay': self.pol_overlay.get(),
+                 'acq_mode': self.pol_acq.get(), 'avg_n': int(self.pol_avg_n.get() or 16)}
         except ValueError: return self.log("Error: Missing/invalid inputs.")
         threading.Thread(target=self._polar_worker, args=(p,), daemon=True).start()
 
@@ -1924,7 +2070,7 @@ class AirAcousticsSuite(ctk.CTk):
         except Exception as e: self.log(f"STFT Err: {e}")
         finally:
             if self.scope: self.scope.timeout = 5000
-            self._set_ui_state(False)
+            self.is_running = False; self._set_ui_state(False)
 
     def _cwt_worker(self, p):
         try:
@@ -1960,9 +2106,9 @@ class AirAcousticsSuite(ctk.CTk):
             self.after(0, lambda tm=ts, fr=fhz, z=np.abs(coefs): self.update_cwt_ui(tm, fr, z))
             self._is_dirty = True
         except Exception as e: self.log(f"CWT Err: {e}")
-        finally: 
+        finally:
             if self.scope: self.scope.timeout = 5000
-            self._set_ui_state(False)
+            self.is_running = False; self._set_ui_state(False)
 
     def _burst_worker(self, p):
         try:
@@ -2029,8 +2175,28 @@ class AirAcousticsSuite(ctk.CTk):
                 if dist_m and dist_m > 0.01:
                     sl_text = f"SL@1m: {peak_spl + 20 * np.log10(dist_m) + alpha_db_m * dist_m:.1f} dB"
 
-            f2 = np.fft.rfftfreq(len(mic_v), dt); m2 = np.abs(np.fft.rfft(mic_v))
+            # Gate FFT to burst window only (exclude pre-trigger silence and far tail)
+            if len(a2) > 1:
+                gate_s = max(0, a2[0] - int(0.0005 / dt))   # 0.5 ms before RX onset
+                gate_e = min(len(mic_v), a2[-1] + int(0.002 / dt))  # 2 ms after RX end
+                gated = mic_v[gate_s:gate_e]
+            else:
+                gated = mic_v
+            # Apply window function
+            _win_map = {'Hanning': np.hanning, 'Hamming': np.hamming, 'Blackman': np.blackman}
+            _win_fn = _win_map.get(p.get('fft_window', 'Hanning'), None)
+            window = _win_fn(len(gated)) if _win_fn else np.ones(len(gated))
+            windowed = gated * window
+            f2 = np.fft.rfftfreq(len(windowed), dt); m2 = np.abs(np.fft.rfft(windowed))
             self.last_burst_fft_f = f2; self.last_burst_fft_m = m2
+            # Auto-detect peak frequency from FFT
+            if len(m2) > 0:
+                _fmin_hz = p.get('fft_min') or 0; _fmax_hz = p.get('fft_max') or f2[-1]
+                _mask = (f2 >= _fmin_hz) & (f2 <= _fmax_hz)
+                _masked_m = m2.copy(); _masked_m[~_mask] = 0
+                peak_fft_freq = f2[np.argmax(_masked_m)] if _mask.any() else f2[np.argmax(m2)]
+            else:
+                peak_fft_freq = 0.0
             thd_pct, harm_mags = self._calculate_thd(f2, m2, freq_hz)
             thd_text = f"THD: {thd_pct:.1f}%"
             thd_warn = "⚠ HIGH THD — Reduce drive voltage!" if thd_pct > 10 else "⚡ Moderate THD — transducer may be non-linear" if thd_pct > 5 else ""
@@ -2057,19 +2223,21 @@ class AirAcousticsSuite(ctk.CTk):
             if len(a1) > 0 and len(a2) > 0:
                 a2_tail = np.where(env2 > (np.max(env2) * 0.03))[0]
                 plot_end_idx = a2_tail[-1] if len(a2_tail) > 0 else a2[-1]
-                cs_, ce = tm[a1[0]] - 0.3, tm[plot_end_idx] + 0.5 + extra_tail_ms
-                ss, se  = tm[a2[0]] - 0.3, tm[plot_end_idx] + 0.5 + extra_tail_ms
+                cs_ = tm[a1[0]]  # start exactly at TX burst — no pre-gap
+                ce  = tm[plot_end_idx] + 0.5 + extra_tail_ms
+                ss  = max(0.0, tm[a2[0]] - 0.05)
+                se  = ce
             else:
                 cs_, ce = tm[0], tm[-1]; ss, se = tm[0], tm[-1]
                 
             ce = min(ce, tm[-1]); se = min(se, tm[-1]); cs_ = max(cs_, tm[0]); ss = max(ss, tm[0])
-            self.after(0, lambda: self.update_burst_ui(tm, data[0], mic_v, env2, f2, m2, eff_v_pa, cs_, ce, ss, se, p['fft_min'], p['fft_max'], noise_rms, ns, ne, freq_hz, thd_pct, harm_mags, tau, rd_peak, rd_end))
+            self.after(0, lambda pf=peak_fft_freq, fs=p['fft_scale']: self.update_burst_ui(tm, data[0], mic_v, env2, f2, m2, eff_v_pa, cs_, ce, ss, se, p['fft_min'], p['fft_max'], noise_rms, ns, ne, freq_hz, thd_pct, harm_mags, tau, rd_peak, rd_end, pf, fs))
             if alpha_db_m > 0: self.log(f"Absorption: {alpha_db_m:.4f} dB/m @ {freq_hz/1000:.1f} kHz, {p['humidity']}% RH")
             self._is_dirty = True
         except Exception as e: self.log(f"Burst Err: {e}")
-        finally: 
+        finally:
             if self.scope: self.scope.timeout = 5000
-            self._set_ui_state(False)
+            self.is_running = False; self._set_ui_state(False)
 
     def _sweep_worker(self, p):
         try:
@@ -2077,18 +2245,37 @@ class AirAcousticsSuite(ctk.CTk):
             eff_v_pa = p['eff_v_pa']; wf = WAVEFORMS.get(p['waveform'], "SINusoid")
             f_l, v_l, pa_l, s_l = [], [], [], []
             self.after(0, lambda: self.clear_bw_plot())
-            if p['spacing'] == "Log": steps = np.geomspace(p['s'], p['e'], int((p['e']-p['s'])/p['st'])+1)
+            if p['spacing'] == "Log":
+                n_pts = int(p['st']) if (p['st'] >= 2 and p['st'] == int(p['st'])) else int((p['e']-p['s'])/p['st'])+1
+                steps = np.geomspace(p['s'], p['e'], max(2, n_pts))
             else: steps = np.arange(p['s'], p['e']+p['st'], p['st'])
             total = len(steps)
             self._fg_set_continuous(waveform=wf, voltage=str(p['voltage'])); self.fg.write("OUTPut1:STATe ON")
-            self._scope_set_acquire("Normal")
+            self._scope_set_acquire(p['acq_mode'], p['avg_n'])
 
             for idx, f in enumerate(steps):
                 if not self.is_running: break
                 pct = (idx+1)/total
                 self.after(0, lambda p_=pct: (self.sweep_progress.set(p_), self.sweep_prog_lbl.configure(text=f"{int(p_*100)}%")))
-                self.fg.write(f"SOURCE1:FREQUENCY {f}"); time.sleep(p['dwell'])
-                v_raw = self._scope_measure_cw(RX_CHANNEL, p['meas'])
+                self.fg.write(f"SOURCE1:FREQUENCY {f}")
+                # Scale the scope timebase to the drive frequency so the displayed
+                # window always holds a fixed number of full cycles (10 divisions).
+                # Without this, a fixed window (~12.8 ms) shows <1 cycle below ~78 Hz
+                # and the AC "DISPlay" RMS collapses, giving a false high-pass cliff.
+                CYCLES_ON_SCREEN = 20
+                tdiv = CYCLES_ON_SCREEN / (f * 10.0)
+                self.scope.write(f":TIMebase:SCALe {tdiv:.9f}")
+                self.scope.write(":RUN")
+                # The frame time now scales with frequency (10 divisions * tdiv).
+                # At low frequencies a frame is slow (0.4 s at 50 Hz), and Average
+                # mode needs ~avg_n frames to converge, so the fixed Dwell is not
+                # enough time for the screen to fill/average -> jumpy low-freq reads.
+                # Wait for at least a full (averaged) acquisition before measuring.
+                frame_time = 10.0 * tdiv
+                n_frames = p['avg_n'] if p['acq_mode'] == "Average" else 3
+                settle = max(p['dwell'], n_frames * frame_time)
+                time.sleep(settle)
+                v_raw = self._scope_measure_cw(RX_CHANNEL, p['meas'], run=False)
                 v_rms = v_raw/(2*np.sqrt(2)) if p['meas']=="Vpp" else v_raw/np.sqrt(2) if p['meas']=="Peak" else v_raw
                 try:
                     scale = float(self.scope.query(f":{RX_CHANNEL}:SCALe?"))
@@ -2122,21 +2309,27 @@ class AirAcousticsSuite(ctk.CTk):
                     q  = peak_freq / bw if bw > 0 else float('inf')
                     bw_results[db_drop] = {'bw': bw, 'q': q, 'li': li, 'ri': ri}
 
-                bw3 = bw_results[3.0]['bw']; q3 = bw_results[3.0]['q']
-                highlight_db = BW_THRESHOLDS.get(p['bw_highlight'], 3.0); active_bw = bw_results[highlight_db]['bw']
-                
+                highlight_db = BW_THRESHOLDS.get(p['bw_highlight'], 6.0)
+                active_bw = bw_results[highlight_db]['bw']
+                active_q  = bw_results[highlight_db]['q']
+
                 def update_labels():
-                    self.peak_f_lbl.configure(text=f"Peak: {peak_freq:.3f} kHz"); self.q_lbl.configure(text=f"Q: {q3:.1f}")
-                    self.dash_peak_f.configure(text=f"{peak_freq:.3f} kHz"); self.dash_bw_title.configure(text=f"Bandwidth ({p['bw_highlight']})")
-                    self.dash_bw.configure(text=f"{active_bw:.3f} kHz"); self.dash_q.configure(text=f"{q3:.1f}")
+                    self.peak_f_lbl.configure(text=f"Peak: {peak_freq:.3f} kHz")
+                    self.q_lbl.configure(text=f"Q ({p['bw_highlight']}): {active_q:.1f}")
+                    self.dash_peak_f.configure(text=f"{peak_freq:.3f} kHz")
+                    self.dash_bw_title.configure(text=f"Bandwidth ({p['bw_highlight']})")
+                    self.dash_bw.configure(text=f"{active_bw:.3f} kHz")
+                    self.dash_q_title.configure(text=f"Q Factor ({p['bw_highlight']})")
+                    self.dash_q.configure(text=f"{active_q:.1f}")
                     for db_val, lbl in self.bw_labels.items():
                         r = bw_results.get(db_val)
                         if r: lbl.configure(text=f"-{int(db_val)}dB: {r['bw']:.3f} kHz (Q={r['q']:.1f})")
                 self.after(0, update_labels)
-                self.after(0, lambda: self.update_sw_bw_plot(f_arr, s_arr, peak_idx, bw_results, highlight_db, q3, peak_freq, bw3))
+                self.after(0, lambda: self.update_sw_bw_plot(f_arr, s_arr, peak_idx, bw_results, highlight_db, active_q, peak_freq, active_bw, p['bw_highlight']))
             self._is_dirty = True
         except Exception as e: self.log(f"Sweep Err: {e}")
         finally:
+            self.is_running = False
             self.after(0, lambda: self.sweep_prog_lbl.configure(text="Finished")); self._set_ui_state(False)
 
     def _polar_worker(self, p):
@@ -2150,13 +2343,13 @@ class AirAcousticsSuite(ctk.CTk):
             elif p['dir'] == "Both": angles = angles + list(reversed(angles[:-1]))
             total = len(angles)
             self.arduino.write(f"G{angles[0]}\n".encode()); time.sleep(4)
-            al, vl = [], []; self._scope_set_acquire("Normal")
+            al, vl = [], []; self._scope_set_acquire(p['acq_mode'], p['avg_n'])
             
             for idx, deg in enumerate(angles):
                 if not self.is_running: break
                 self.after(0, lambda p_=(idx+1)/total: (self.polar_progress.set(p_), self.polar_prog_lbl.configure(text=f"{int(p_*100)}%")))
-                self.arduino.write(f"G{deg}\n".encode()); time.sleep(p['dwell'])
-                v_rms = self._scope_measure_cw(RX_CHANNEL, "RMS")
+                self.arduino.write(f"G{deg}\n".encode()); self.scope.write(":RUN"); time.sleep(p['dwell'])
+                v_rms = self._scope_measure_cw(RX_CHANNEL, "RMS", run=False)
                 vl.append(v_rms); al.append(np.radians(deg))
                 try:
                     scale = float(self.scope.query(f":{RX_CHANNEL}:SCALe?"))
@@ -2172,6 +2365,7 @@ class AirAcousticsSuite(ctk.CTk):
                 
             mx = max(vl) or 1; norm = [20*np.log10(v/mx) for v in vl]
             self.last_polar_data = np.column_stack((al, norm))
+            self.last_polar_raw  = np.column_stack((np.degrees(al), vl))
             if p['overlay'] == "Overlay": self._polar_overlays.append((list(al), list(norm)))
             self.fg.write("OUTPut1:STATe OFF"); self.arduino.write(b"G0\n")
             try:
@@ -2183,10 +2377,13 @@ class AirAcousticsSuite(ctk.CTk):
                     return f"{abs(sa[r]-sa[l]):.1f}" if sn[l] <= th and sn[r] <= th else "--"
                 bw3, bw6 = fb(-3.0), fb(-6.0)
             except: bw3, bw6 = "--", "--"
+            self.last_polar_bw3 = bw3; self.last_polar_bw6 = bw6
             self.after(0, lambda: (self.pol_bw3_lbl.configure(text=f"-3dB: {bw3} °"), self.pol_bw6_lbl.configure(text=f"-6dB: {bw6} °"), self.dash_bw3.configure(text=f"{bw3} °"), self.dash_bw6.configure(text=f"{bw6} °")))
             self._is_dirty = True
         except Exception as e: self.log(f"Polar Err: {e}")
-        finally: self.after(0, lambda: self.polar_prog_lbl.configure(text="Finished")); self._set_ui_state(False)
+        finally:
+            self.is_running = False
+            self.after(0, lambda: self.polar_prog_lbl.configure(text="Finished")); self._set_ui_state(False)
 
     # ------------------------------------------------------------------
     # Prediction Methods
@@ -2301,7 +2498,7 @@ class AirAcousticsSuite(ctk.CTk):
         self._make_labels_editable(ax)
         self.fig_cwt.tight_layout(); self.canvas_cwt.draw()
 
-    def update_burst_ui(self, tm, ch1, ch2, env2, f2, m2, eff_v_pa, cs, ce, ss, se, fft_min, fft_max, noise_rms, ns, ne, freq_hz=0, thd_pct=0, harm_mags=None, tau=None, rd_peak=0, rd_end=0):
+    def update_burst_ui(self, tm, ch1, ch2, env2, f2, m2, eff_v_pa, cs, ce, ss, se, fft_min, fft_max, noise_rms, ns, ne, freq_hz=0, thd_pct=0, harm_mags=None, tau=None, rd_peak=0, rd_end=0, peak_fft_freq=0, fft_scale="dB"):
         self._last_burst_kwargs = {k:v for k,v in locals().items() if k != 'self'}
         self.fig_b.clf()
         gs = self.fig_b.add_gridspec(2, 2)
@@ -2313,7 +2510,7 @@ class AirAcousticsSuite(ctk.CTk):
         sep = float(self.burst_sep_slider.get())
 
         self.ax_c.plot(tm, ch1, color='red', alpha=0.6, label='TX (V)', lw=1)
-        self.ax_c.set_xlim(cs, ce); self.ax_c.set_ylim(-sep*self._burst_tx_mx, 1.2*self._burst_tx_mx)
+        self.ax_c.set_ylim(-sep*self._burst_tx_mx, 1.2*self._burst_tx_mx)
         self.ax_c.set_xlabel("Time (ms)"); self.ax_c.set_ylabel("TX (V)", color='red'); self.ax_c.tick_params(axis='y', colors='red')
         self.ax_ct.plot(tm, ch2*1000, color='blue', alpha=0.8, label='RX (mV)', lw=1)
         self.ax_ct.set_ylim(-1.2*self._burst_rx_mx, sep*self._burst_rx_mx); self.ax_ct.set_ylabel("RX (mV)", color='blue'); self.ax_ct.tick_params(axis='y', colors='blue')
@@ -2340,17 +2537,20 @@ class AirAcousticsSuite(ctk.CTk):
         self._make_legend_interactive(leg_s, h_s, ax_s)
         self._make_labels_editable(ax_s)
 
-        ax_f.plot(f2/1000, m2, color='blue', lw=0.8)
+        # Convert to dB if requested (floor at -100 dB to avoid log(0))
+        if fft_scale == "dB" and len(m2) > 0 and np.max(m2) > 0:
+            m2_plot = 20 * np.log10(np.maximum(m2 / np.max(m2), 1e-5))
+            ylabel_fft = "Magnitude (dBFS)"
+        else:
+            m2_plot = m2
+            ylabel_fft = "Magnitude"
+        ax_f.plot(f2/1000, m2_plot, color='blue', lw=0.8)
         if harm_mags and freq_hz > 0:
-            df = f2[1] - f2[0]; sw = max(1, int(200/df))
             for n in range(len(harm_mags)):
                 hf = freq_hz * (n + 1)
                 if hf/1000 > (fft_max/1000 if fft_max else f2[-1]/1000): break
                 color = '#2e7d32' if n == 0 else '#c62828'
-                
-                # FIX: Removed the "if n < 4" limit so every drawn harmonic gets a legend entry
                 label = 'Fundamental' if n == 0 else f'H{n+1}'
-                
                 ax_f.axvline(hf/1000, color=color, ls='--', lw=1, alpha=0.5, label=label)
             if thd_pct > 0:
                 warn_color = '#c62828' if thd_pct > 10 else '#e65100' if thd_pct > 5 else '#2e7d32'
@@ -2360,8 +2560,10 @@ class AirAcousticsSuite(ctk.CTk):
             h_f, l_f = ax_f.get_legend_handles_labels()
             ax_f._master_handles = h_f; ax_f._master_labels = l_f; ax_f._leg_loc = 'upper left'; ax_f._leg_fs = 7
             self._make_legend_interactive(leg_f, h_f, ax_f)
-            
-        ax_f.set_xlabel("Freq (kHz)"); ax_f.set_ylabel("Magnitude"); ax_f.set_title("RX FFT + Harmonic Analysis")
+        # Show auto-detected peak frequency in title
+        peak_str = f"  |  Peak: {peak_fft_freq/1000:.3f} kHz" if peak_fft_freq > 0 else ""
+        ax_f.set_xlabel("Freq (kHz)"); ax_f.set_ylabel(ylabel_fft)
+        ax_f.set_title(f"RX FFT + Harmonic Analysis{peak_str}")
         if fft_min is not None and fft_max is not None: ax_f.set_xlim(fft_min/1000, fft_max/1000)
         self._make_labels_editable(ax_f)
         
@@ -2369,13 +2571,106 @@ class AirAcousticsSuite(ctk.CTk):
         for ax in self.fig_b.axes:
             self._make_labels_editable(ax)
             
-        self.fig_b.tight_layout(); self.canvas_b.draw()
+        self.fig_b.tight_layout()
+        self.ax_c.set_xlim(cs, ce)   # after tight_layout — prevents twinx/layout from re-expanding the range
+        self.canvas_b.draw()
+
+    # ------------------------------------------------------------------
+    # Live-Replot helpers (re-render from stored raw data with new UI settings)
+    # ------------------------------------------------------------------
+    def _replot_burst_fft(self, *args):
+        """Recompute FFT with current window/scale settings and refresh the burst plot."""
+        if not self._last_burst_kwargs or self.last_burst_mic is None or self.last_burst_t is None:
+            return
+        kw = dict(self._last_burst_kwargs)
+        mic_v = self.last_burst_mic
+        dt = float(self.last_burst_t[1] - self.last_burst_t[0]) if len(self.last_burst_t) > 1 else 1e-6
+        # Re-gate and re-window
+        env2 = kw.get('env2', np.abs(hilbert(mic_v)))
+        a2 = np.where(env2 > (np.max(env2) * 0.15))[0]
+        if len(a2) > 1:
+            gate_s = max(0, a2[0] - int(0.0005 / dt))
+            gate_e = min(len(mic_v), a2[-1] + int(0.002 / dt))
+            gated = mic_v[gate_s:gate_e]
+        else:
+            gated = mic_v
+        _win_map = {'Hanning': np.hanning, 'Hamming': np.hamming, 'Blackman': np.blackman}
+        _win_fn = _win_map.get(self.fft_window.get(), None)
+        window = _win_fn(len(gated)) if _win_fn else np.ones(len(gated))
+        f2 = np.fft.rfftfreq(len(gated), dt)
+        m2 = np.abs(np.fft.rfft(gated * window))
+        self.last_burst_fft_f = f2; self.last_burst_fft_m = m2
+        try:
+            fft_min = float(self.fft_fmin.get()) * 1000 if self.fft_fmin.get().strip() else None
+            fft_max = float(self.fft_fmax.get()) * 1000 if self.fft_fmax.get().strip() else None
+        except ValueError:
+            fft_min, fft_max = kw.get('fft_min'), kw.get('fft_max')
+        if len(f2) > 0:
+            _lo = fft_min or 0; _hi = fft_max or f2[-1]
+            _mask = (f2 >= _lo) & (f2 <= _hi)
+            m2m = m2.copy(); m2m[~_mask] = 0
+            peak_fft_freq = f2[np.argmax(m2m)] if _mask.any() else f2[np.argmax(m2)]
+        else:
+            peak_fft_freq = 0.0
+        thd_pct, harm_mags = self._calculate_thd(f2, m2, kw.get('freq_hz', 0))
+        kw.update({'f2': f2, 'm2': m2, 'thd_pct': thd_pct, 'harm_mags': harm_mags,
+                   'peak_fft_freq': peak_fft_freq, 'fft_scale': self.fft_scale.get(),
+                   'fft_min': fft_min, 'fft_max': fft_max})
+        self.update_burst_ui(**kw)
+
+    def _replot_sweep(self, *args):
+        """Replot the sweep with the current Y-axis setting."""
+        if self.last_sweep_data is None: return
+        sd = self.last_sweep_data; yaxis = self.sweep_yaxis.get()
+        y_idx = {"SPL (dB)": 3, "Pa RMS": 2, "V RMS": 1}.get(yaxis, 3)
+        self._sweep_overlays = [(list(sd[:, 0]), list(sd[:, y_idx]), yaxis)]
+        self._redraw_sw_overlays(yaxis)
+        if self._last_sw_bw_kwargs:
+            self.update_sw_bw_plot(**self._last_sw_bw_kwargs)
+
+    def _replot_polar(self, *args):
+        """Replot the polar diagram with the current dB range."""
+        al = getattr(self, '_last_polar_al', None)
+        vl = getattr(self, '_last_polar_vl', None)
+        if al is None or vl is None: return
+        pol_min = int(float(self.pol_range.get()))
+        self.update_polar_ui(al, vl, pol_min)
+
+    def _clear_sweep_overlays(self):
+        self._sweep_overlays = []
+        if hasattr(self, 'last_sweep_data') and self.last_sweep_data is not None:
+            sd = self.last_sweep_data; yaxis = self.sweep_yaxis.get()
+            y_idx = {"SPL (dB)": 3, "Pa RMS": 2, "V RMS": 1}.get(yaxis, 3)
+            self.update_sw_plot(sd[:, 0], sd[:, y_idx], yaxis)
+        self.log("Sweep overlays cleared.")
 
     def update_sw_plot(self, f, y, yaxis):
-        self.ax_sw.clear(); self.ax_sw.plot(f, y, 'b-o', markersize=3)
+        if self.sweep_overlay.get() == "Overlay":
+            self._sweep_overlays.append((list(f), list(y), yaxis))
+        else:
+            self._sweep_overlays = [(list(f), list(y), yaxis)]
+        self._redraw_sw_overlays(yaxis)
+
+    def _redraw_sw_overlays(self, yaxis=None):
+        if not self._sweep_overlays: return
+        ov = self._sweep_overlays
+        if yaxis is None: yaxis = ov[-1][2]
+        self.ax_sw.clear()
+        overlay_colors = ['#78909c','#a5d6a7','#90caf9','#ce93d8','#ffcc80','#ef9a9a']
+        n = len(ov)
+        for idx, (ov_f, ov_y, _) in enumerate(ov[:-1]):
+            col = overlay_colors[idx % len(overlay_colors)]
+            self.ax_sw.plot(ov_f, ov_y, '-o', markersize=2, lw=1, alpha=0.65, color=col, label=f"Run {idx+1}")
+        last_f, last_y, _ = ov[-1]
+        self.ax_sw.plot(last_f, last_y, 'b-o', markersize=3, lw=1.5, label=f"Run {n}" if n > 1 else None)
         self.ax_sw.set_xlabel("Freq (kHz)")
         self.ax_sw.set_ylabel({"SPL (dB)":"SPL (dB re 20µPa)","Pa RMS":"Pa RMS","V RMS":"V RMS"}.get(yaxis, yaxis))
         self.ax_sw.grid(True, alpha=0.3)
+        if n > 1:
+            leg = self.ax_sw.legend(fontsize=7, loc='upper right')
+            h, l = self.ax_sw.get_legend_handles_labels()
+            self.ax_sw._master_handles = h; self.ax_sw._master_labels = l; self.ax_sw._leg_loc = 'upper right'; self.ax_sw._leg_fs = 7
+            self._make_legend_interactive(leg, h, self.ax_sw)
         self._make_labels_editable(self.ax_sw)
         self.fig_sw.tight_layout(); self.canvas_sw.draw()
 
@@ -2384,7 +2679,7 @@ class AirAcousticsSuite(ctk.CTk):
             ax.clear(); ax.set_xticks([]); ax.set_yticks([]); ax.set_title("Waiting...", fontsize=10, color="gray")
         self.canvas_sw.draw()
 
-    def update_sw_bw_plot(self, f, s, peak_i, bw_results, highlight_db, q_val, peak_freq, bw3):
+    def update_sw_bw_plot(self, f, s, peak_i, bw_results, highlight_db, q_val, peak_freq, bw_val, bw_label="-6 dB"):
         self._last_sw_bw_kwargs = {k:v for k,v in locals().items() if k != 'self'}
         self.ax_bw.clear()
         hr = bw_results[highlight_db]; li, ri = hr['li'], hr['ri']
@@ -2409,10 +2704,10 @@ class AirAcousticsSuite(ctk.CTk):
         self.ax_bw._master_handles = h_bw; self.ax_bw._master_labels = l_bw; self.ax_bw._leg_loc = 'lower center'; self.ax_bw._leg_fs = 7
         self._make_legend_interactive(leg_bw, h_bw, self.ax_bw)
         self._make_labels_editable(self.ax_bw)
-        self._draw_q_gauge(q_val, peak_freq, bw3)
+        self._draw_q_gauge(q_val, peak_freq, bw_val, bw_label)
         self.fig_sw.tight_layout(); self.canvas_sw.draw()
 
-    def _draw_q_gauge(self, q_val, peak_freq=None, bw_val=None):
+    def _draw_q_gauge(self, q_val, peak_freq=None, bw_val=None, bw_label="-6 dB"):
         ax = self.ax_qgauge; ax.clear(); ax.set_aspect('equal')
         
         # FIX: Deepened the Y-axis lower limit to -1.2 to fully un-squish the bottom text
@@ -2445,10 +2740,11 @@ class AirAcousticsSuite(ctk.CTk):
         else: d,c = "Very High Q","#1b5e20"
         
         ax.text(0, -0.65, d, ha='center', va='center', fontsize=11, color=c, fontweight='bold')
-        if peak_freq and bw_val: ax.text(0, -0.95, f"f\u2080/BW = {peak_freq:.2f}/{bw_val:.3f}", ha='center', fontsize=9, color='gray')
+        if peak_freq and bw_val: ax.text(0, -0.95, f"f\u2080 / BW{bw_label} = {peak_freq:.2f}/{bw_val:.3f}", ha='center', fontsize=9, color='gray')
 
     def update_polar_ui(self, al=None, vl=None, pol_min=-30):
         if al is not None and vl is not None:
+            self._last_polar_kwargs = {'al': al, 'vl': vl, 'pol_min': pol_min}
             self._last_polar_al = al
             self._last_polar_vl = vl
         else:
@@ -2523,7 +2819,8 @@ class AirAcousticsSuite(ctk.CTk):
                 'last_burst_t': self.last_burst_t, 'last_burst_tx': self.last_burst_tx, 'last_burst_mic': self.last_burst_mic,
                 '_last_burst_pre_list': self._last_burst_pre_list, 'last_sweep_data': self.last_sweep_data,
                 'last_polar_data': self.last_polar_data, 'last_adv_raw': self.last_adv_raw, 'last_cwt_raw': self.last_cwt_raw,
-                '_polar_overlays': getattr(self, '_polar_overlays', []), 'imp_data': getattr(self, 'imp_data', {}), 'burst_kwargs': self._last_burst_kwargs,
+                '_polar_overlays': getattr(self, '_polar_overlays', []), '_sweep_overlays': getattr(self, '_sweep_overlays', []),
+                'imp_data': getattr(self, 'imp_data', {}), 'burst_kwargs': self._last_burst_kwargs,
                 'sw_bw_kwargs': self._last_sw_bw_kwargs, 'polar_kwargs': self._last_polar_kwargs,
                 'adv_kwargs': self._last_adv_kwargs, 'cwt_kwargs': self._last_cwt_kwargs
             }
@@ -2538,6 +2835,312 @@ class AirAcousticsSuite(ctk.CTk):
         self.file_btn.configure(text_color="#00E676", text="✓ SAVED")
         self.after(1500, lambda: self.file_btn.configure(text_color=orig_color, text="📁 File"))
 
+    def _build_html_report(self, name, ts, has_plots=False, embedded_images=None):
+        imp_files = ", ".join(self.imp_data.keys()) if hasattr(self, 'imp_data') and self.imp_data else "None"
+        def _img(fn):
+            if embedded_images and fn in embedded_images:
+                return f'<img src="{embedded_images[fn]}" style="max-width:100%;margin:12px 0;border:1px solid #ddd;border-radius:4px;">'
+            elif has_plots:
+                return f'<img src="{fn}" style="max-width:100%;margin:12px 0;border:1px solid #ddd;border-radius:4px;">'
+            return ''
+        def _row(k, v): return f'<tr><td style="padding:5px 10px;border-bottom:1px solid #eee;color:#555">{k}</td><td style="padding:5px 10px;border-bottom:1px solid #eee;font-weight:bold">{v}</td></tr>'
+        def _metric(k, v, col='#1565c0'): return f'<div style="display:inline-block;margin:6px 12px 6px 0;padding:10px 18px;background:#f0f4ff;border-left:4px solid {col};border-radius:4px"><div style="font-size:11px;color:#666">{k}</div><div style="font-size:20px;font-weight:bold;color:{col}">{v}</div></div>'
+        return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>Air Acoustics Suite — Lab Report — {name}</title>
+<style>
+  body{{font-family:Arial,sans-serif;margin:0;background:#f5f5f5;color:#333}}
+  .page{{max-width:960px;margin:30px auto;background:white;padding:40px;box-shadow:0 2px 8px rgba(0,0,0,.15);border-radius:6px}}
+  h1{{color:#1565c0;border-bottom:3px solid #1565c0;padding-bottom:8px;margin-bottom:4px}}
+  h2{{color:#e65100;margin-top:32px;margin-bottom:8px;border-left:4px solid #e65100;padding-left:10px}}
+  h3{{color:#555;margin:18px 0 6px}}
+  table{{border-collapse:collapse;width:100%;margin:8px 0}}
+  .meta{{color:#777;font-size:13px;margin-bottom:20px}}
+  footer{{margin-top:40px;padding-top:12px;border-top:1px solid #ddd;font-size:11px;color:#aaa;text-align:center}}
+</style></head>
+<body><div class="page">
+<h1>Air Acoustics Suite — Lab Report</h1>
+<p class="meta">Scan: <strong>{name}</strong> &nbsp;|&nbsp; Generated: {ts}</p>
+
+<h2>Calibration</h2>
+<table>
+{_row("Temperature",f"{self.temp_entry.get()} °C")}
+{_row("Humidity",f"{self.humidity_entry.get()} %RH")}
+{_row("Mic Sensitivity",f"{self.mic_sens.get()} mV/Pa")}
+{_row("Module Gain",f"{self.module_gain.get()} dB")}
+{_row("Effective Sensitivity",f"{self._effective_sens_v_pa()*1000:.2f} mV/Pa")}
+{_row("Reference Distance",f"{self.ref_dist_entry.get()} cm (Override ToF: {self.ref_dist_lock_var.get()})")}
+{_row("Calibrated Noise Floor",f"{self._calibrated_noise_rms:.6f} V RMS")}
+</table>
+
+<h2>Burst Analysis</h2>
+<h3>Settings</h3>
+<table>
+{_row("FG Mode",self.burst_fg_mode.get())}
+{_row("Waveform",self.burst_wave.get())}
+{_row("Drive",f"{self.burst_f.get()} kHz, {self.burst_voltage.get()} Vpp, {self.burst_cycles.get()} cycles")}
+{_row("Scope",f"{self.burst_acq.get()}, {self.burst_avg_n.get()} averages")}
+{_row("FG ON Duration",f"{self.burst_capture_time.get()} s")}
+{_row("FFT Window",self.fft_window.get())}
+</table>
+<h3>Results</h3>
+{_metric("Scope Vpp",self.dash_vpp.cget('text'),'#1565c0')}
+{_metric("Acoustic",self.dash_pa.cget('text'),'#1565c0')}
+{_metric("SPL",self.dash_spl.cget('text'),'#2e7d32')}
+{_metric("Source Level",self.dash_sl.cget('text'),'#2e7d32')}
+{_metric("SNR",self.dash_snr.cget('text'),'#6a1b9a')}
+{_metric("ToF Distance",self.dash_dist.cget('text'),'#00695c')}
+{_metric("THD",self.dash_thd.cget('text'),'#b71c1c')}
+{_metric("Ring-Down τ",self.dash_tau.cget('text'),'#e65100')}
+{_img("Plot_Burst.png")}
+
+<h2>Resonance Sweep</h2>
+<h3>Settings</h3>
+<table>
+{_row("Waveform",self.sweep_wave.get())}
+{_row("Drive Voltage",f"{self.sweep_voltage.get()} Vpp")}
+{_row("Measurement",self.sweep_meas.get())}
+{_row("Frequency Range",f"{self.start_f.get()} – {self.end_f.get()} kHz, step {self.step_f.get()} ({self.sweep_spacing.get()})")}
+{_row("Dwell",f"{self.sweep_dwell.get()} s")}
+</table>
+<h3>Results</h3>
+{_metric("Peak Frequency",self.dash_peak_f.cget('text'),'#fbc02d')}
+{_metric("Bandwidth",self.dash_bw.cget('text'),'#e65100')}
+{_metric("Q Factor",self.dash_q.cget('text'),'#2e7d32')}
+{_img("Plot_Resonance.png")}
+
+<h2>Polar Scan</h2>
+<h3>Settings</h3>
+<table>
+{_row("Waveform",self.polar_wave.get())}
+{_row("Drive",f"{self.pol_f.get()} kHz, {self.polar_voltage.get()} Vpp")}
+{_row("Scan Range",f"{self.pol_start.get()}° to {self.pol_end.get()}°, step {self.pol_step.get()}° ({self.pol_dir.get()})")}
+{_row("Dwell per Step",f"{self.pol_dwell.get()} s")}
+{_row("Theoretical Pattern",f"{self.pred_geom.get()}, {self.pred_dim.get()} mm, mode ({self.pred_mode_n.get()},{self.pred_mode_m.get()})")}
+</table>
+<h3>Results</h3>
+{_metric("-3dB Beamwidth",self.dash_bw3.cget('text'),'#d84315')}
+{_metric("-6dB Beamwidth",self.dash_bw6.cget('text'),'#fbc02d')}
+{_img("Plot_Polar.png")}
+
+<h2>Advanced Timing</h2>
+<table>
+{_row("Wavelet (CWT)",f"{self.cwt_f.get()} kHz, {self.cwt_voltage.get()} V, {self.cwt_cycles.get()} cycles ({self.cwt_wave.get()})")}
+{_row("STFT",f"{self.adv_f.get()} kHz, {self.adv_voltage.get()} V, {self.adv_cycles.get()} cycles ({self.adv_wave.get()})")}
+</table>
+{_img("Plot_STFT.png")}{_img("Plot_Wavelet.png")}
+
+<h2>Impedance</h2>
+<table>{_row("Imported Files",imp_files)}</table>
+{_img("Plot_Impedance.png")}
+
+<footer>Generated by Air Acoustics Suite &nbsp;|&nbsp; {ts}</footer>
+</div></body></html>"""
+
+    def _export_current_tab_plot(self):
+        TAB_MAP = {
+            "Burst Analysis":   (self.fig_b,   'Plot_Burst',      (12, 10), lambda: self.last_burst_t is not None),
+            "Resonance Sweep":  (self.fig_sw,  'Plot_Resonance',  (16,  6), lambda: self.last_sweep_data is not None),
+            "Polar Plot":       (self.fig_p,   'Plot_Polar',      ( 8,  8), lambda: self.last_polar_data is not None),
+            "Wavelet (CWT)":    (self.fig_cwt, 'Plot_Wavelet',    (12,  6), lambda: self.last_cwt_raw is not None),
+            "STFT Spectrogram": (self.fig_adv, 'Plot_STFT',       (12,  6), lambda: self.last_adv_raw is not None),
+            "Impedance":        (self.fig_imp, 'Plot_Impedance',  (12,  6), lambda: bool(getattr(self, 'imp_data', {}))),
+        }
+        tab = self.tabs.get()
+        if tab not in TAB_MAP:
+            messagebox.showinfo("Export", "No plot available for the current tab."); return
+        fig, default_name, target_size, has_data = TAB_MAP[tab]
+        if not has_data():
+            messagebox.showinfo("Export", f"No data available for '{tab}' yet."); return
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".png", filetypes=[("PNG Image", "*.png")],
+            initialfile=f"{default_name}.png", title=f"Save {tab} Plot")
+        if not filepath: return
+        try:
+            orig_size = fig.get_size_inches()
+            fig.set_size_inches(*target_size)
+            fig.tight_layout()
+            fig.savefig(filepath, dpi=200, bbox_inches='tight')
+            fig.set_size_inches(*orig_size)
+            fig.tight_layout()
+            fig.canvas.draw_idle()
+            self.log(f"Plot saved: {os.path.basename(filepath)}")
+        except Exception as e:
+            self.log(f"Plot save err: {e}"); messagebox.showerror("Export Error", str(e))
+
+    def _export_current_tab_csv(self):
+        tab = self.tabs.get()
+        saved_path = None
+        try:
+            if tab == "Burst Analysis":
+                if self.last_burst_t is None and self.last_burst_fft_f is None:
+                    messagebox.showinfo("Export", "No burst data available."); return
+                fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+                    initialfile="Data_Burst.csv", title="Save Burst Waveform CSV")
+                if not fp: return
+                if self.last_burst_t is not None:
+                    np.savetxt(fp, np.column_stack((self.last_burst_t, self.last_burst_tx, self.last_burst_mic)),
+                               delimiter=",", header="Time_s,TX_V,RX_V", comments='')
+                if self.last_burst_fft_f is not None:
+                    fft_fp = str(fp).replace(".csv", "_FFT.csv")
+                    np.savetxt(fft_fp, np.column_stack((self.last_burst_fft_f, self.last_burst_fft_m)),
+                               delimiter=",", header="Freq_Hz,Magnitude", comments='')
+                    self.log(f"Also saved: {os.path.basename(fft_fp)}")
+                saved_path = fp
+
+            elif tab == "Resonance Sweep":
+                if self.last_sweep_data is None:
+                    messagebox.showinfo("Export", "No sweep data available."); return
+                fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+                    initialfile="Data_Sweep.csv", title="Save Sweep Data CSV")
+                if not fp: return
+                np.savetxt(fp, self.last_sweep_data, delimiter=",", header="Freq_kHz,V_rms,Pa_rms,SPL_dB", comments='')
+                saved_path = fp
+
+            elif tab == "Polar Plot":
+                if self.last_polar_raw is None:
+                    messagebox.showinfo("Export", "No polar data available."); return
+                fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+                    initialfile="Data_Polar.csv", title="Save Polar Data CSV")
+                if not fp: return
+                np.savetxt(fp, self.last_polar_raw, delimiter=",", header="Angle_deg,V_rms", comments='')
+                if self.last_polar_bw3 is not None:
+                    bw_fp = str(fp).replace(".csv", "_BW.csv")
+                    np.savetxt(bw_fp, np.array([[3.0, self.last_polar_bw3],[6.0, self.last_polar_bw6]]),
+                               delimiter=",", header="Threshold_dB,Beamwidth_deg", comments='')
+                    self.log(f"Also saved: {os.path.basename(bw_fp)}")
+                saved_path = fp
+
+            elif tab == "Wavelet (CWT)":
+                if self.last_cwt_raw is None:
+                    messagebox.showinfo("Export", "No CWT data available."); return
+                fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+                    initialfile="Data_CWT.csv", title="Save CWT Data CSV")
+                if not fp: return
+                np.savetxt(fp, self.last_cwt_raw, delimiter=",", header="Time_s,RX_V", comments='')
+                saved_path = fp
+
+            elif tab == "STFT Spectrogram":
+                if self.last_adv_raw is None:
+                    messagebox.showinfo("Export", "No STFT data available."); return
+                fp = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+                    initialfile="Data_STFT.csv", title="Save STFT Data CSV")
+                if not fp: return
+                np.savetxt(fp, self.last_adv_raw, delimiter=",", header="Time_s,RX_V", comments='')
+                saved_path = fp
+
+            elif tab == "Impedance":
+                imp = getattr(self, 'imp_data', {})
+                if not imp:
+                    messagebox.showinfo("Export", "No impedance data available."); return
+                folder = filedialog.askdirectory(title="Select folder to save Impedance CSV(s)")
+                if not folder: return
+                for imp_name, (f_data, z_data, p_data) in imp.items():
+                    np.savetxt(pathlib.Path(folder) / f"Impedance_{imp_name}.csv",
+                               np.column_stack((f_data, z_data, p_data)),
+                               delimiter=",", header="Frequency_Hz,Z_Ohm,Phase_deg", comments='')
+                self.log(f"Impedance CSVs saved to: {os.path.basename(folder)}")
+                return
+
+            else:
+                messagebox.showinfo("Export", "No data available for the current tab."); return
+
+            if saved_path:
+                self.log(f"CSV saved: {os.path.basename(saved_path)}")
+        except Exception as e:
+            self.log(f"CSV save err: {e}"); messagebox.showerror("Export Error", str(e))
+
+    def _capture_plot_as_b64(self, fig, target_size):
+        import io, base64
+        buf = io.BytesIO()
+        orig_size = fig.get_size_inches()
+        try:
+            fig.set_size_inches(*target_size)
+            fig.tight_layout()
+            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            buf.seek(0)
+            return "data:image/png;base64," + base64.b64encode(buf.read()).decode()
+        finally:
+            fig.set_size_inches(*orig_size)
+            fig.tight_layout()
+            fig.canvas.draw_idle()
+
+    def _export_report_pdf(self):
+        # Suggest saving .aas first
+        if self._is_dirty or not self._current_aas_file:
+            ans = messagebox.askyesnocancel("Save Session First?",
+                "It's recommended to save your session (.aas) before exporting so no data is lost.\n\n"
+                "Save now?  (Choose Cancel to abort the export)")
+            if ans is None: return
+            if ans: self.save_aas()
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".pdf", filetypes=[("PDF Document", "*.pdf")],
+            initialfile="Lab_Report.pdf", title="Save Lab Report as PDF")
+        if not filepath: return
+
+        ts   = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        name = os.path.splitext(os.path.basename(filepath))[0]
+
+        # Capture all available plots into base64 data URIs (no temp files needed)
+        plot_defs = [
+            ('Plot_Burst.png',     self.fig_b,   (12, 10), lambda: self.last_burst_t is not None),
+            ('Plot_Resonance.png', self.fig_sw,  (16,  6), lambda: self.last_sweep_data is not None),
+            ('Plot_Polar.png',     self.fig_p,   ( 8,  8), lambda: self.last_polar_data is not None),
+            ('Plot_STFT.png',      self.fig_adv, (12,  6), lambda: self.last_adv_raw is not None),
+            ('Plot_Wavelet.png',   self.fig_cwt, (12,  6), lambda: self.last_cwt_raw is not None),
+            ('Plot_Impedance.png', self.fig_imp, (12,  6), lambda: bool(getattr(self, 'imp_data', {}))),
+        ]
+        embedded = {}
+        for fn, fig, size, has_data in plot_defs:
+            if has_data() and fig:
+                try:
+                    embedded[fn] = self._capture_plot_as_b64(fig, size)
+                except Exception as e:
+                    self.log(f"Could not capture {fn}: {e}")
+
+        try:
+            from xhtml2pdf import pisa
+            html = self._build_html_report(name, ts, has_plots=bool(embedded), embedded_images=embedded)
+            with open(filepath, 'wb') as f:
+                result = pisa.CreatePDF(html, dest=f)
+            if result.err:
+                raise Exception(f"xhtml2pdf error code {result.err}")
+            self.log(f"PDF saved: {os.path.basename(filepath)}")
+        except Exception as e:
+            self.log(f"PDF save err: {e}")
+            messagebox.showerror("Export Error", f"PDF generation failed:\n\n{e}")
+
+    def _export_report_only(self):
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".html", filetypes=[("HTML Report", "*.html")],
+            initialfile="Lab_Report.html", title="Save Lab Report")
+        if not filepath: return
+        ts   = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        name = os.path.splitext(os.path.basename(filepath))[0]
+        # Capture all available plots as base64 so the HTML is fully self-contained
+        plot_defs = [
+            ('Plot_Burst.png',     self.fig_b,   (12, 10), lambda: self.last_burst_t is not None),
+            ('Plot_Resonance.png', self.fig_sw,  (16,  6), lambda: self.last_sweep_data is not None),
+            ('Plot_Polar.png',     self.fig_p,   ( 8,  8), lambda: self.last_polar_data is not None),
+            ('Plot_STFT.png',      self.fig_adv, (12,  6), lambda: self.last_adv_raw is not None),
+            ('Plot_Wavelet.png',   self.fig_cwt, (12,  6), lambda: self.last_cwt_raw is not None),
+            ('Plot_Impedance.png', self.fig_imp, (12,  6), lambda: bool(getattr(self, 'imp_data', {}))),
+        ]
+        embedded = {}
+        for fn, fig, size, has_data in plot_defs:
+            if has_data() and fig:
+                try:
+                    embedded[fn] = self._capture_plot_as_b64(fig, size)
+                except Exception as e:
+                    self.log(f"Could not capture {fn}: {e}")
+        try:
+            html = self._build_html_report(name, ts, has_plots=bool(embedded), embedded_images=embedded or None)
+            with open(filepath, 'w', encoding='utf-8') as f: f.write(html)
+            self.log(f"Report saved: {os.path.basename(filepath)}")
+        except Exception as e:
+            self.log(f"Report save err: {e}"); messagebox.showerror("Export Error", str(e))
+
     def _export_workflow(self, title, save_plots=False, save_csvs=False, save_aas=False):
         dialog = ctk.CTkInputDialog(text="Folder name (blank = timestamp):", title=title)
         name = dialog.get_input()
@@ -2549,45 +3152,8 @@ class AirAcousticsSuite(ctk.CTk):
         if not parent: return
         
         sd = pathlib.Path(parent) / name; sd.mkdir(parents=True, exist_ok=True)
-        
-        # Get a comma separated list of loaded impedance files (if any)
-        imp_files = ", ".join(self.imp_data.keys()) if hasattr(self, 'imp_data') and self.imp_data else "None"
-        
-        # FIX: Expanded the Lab Report to include all hardware settings for total replicability
-        with open(sd / "Full_Lab_Report.txt", 'w', encoding='utf-8') as f:
-            f.write(f"Air Acoustics Suite 1.0 — Lab Report\n{'='*50}\nScan: {name}\nTime: {ts}\n\n"
-                    
-                    f"--- CALIBRATION ---\n"
-                    f"Temp: {self.temp_entry.get()} °C  |  Humidity: {self.humidity_entry.get()} %RH\n"
-                    f"Mic Sens: {self.mic_sens.get()} mV/Pa  |  Gain: {self.module_gain.get()} dB  |  Eff Sens: {self._effective_sens_v_pa()*1000:.2f} mV/Pa\n"
-                    f"Ref Distance: {self.ref_dist_entry.get()} cm  |  Override ToF: {self.ref_dist_lock_var.get()}\n"
-                    f"Calibrated Noise Floor: {self._calibrated_noise_rms:.6f} V RMS\n\n"
-                    
-                    f"--- BURST ANALYSIS ---\n"
-                    f"[Settings] Mode: {self.burst_fg_mode.get()} | Wave: {self.burst_wave.get()} | Drive: {self.burst_f.get()} kHz, {self.burst_voltage.get()} V, {self.burst_cycles.get()} Cycles\n"
-                    f"[Settings] Scope: {self.burst_acq.get()} ({self.burst_avg_n.get()} avgs) | FG ON Time: {self.burst_capture_time.get()}s\n"
-                    f"[Results]  Vpp: {self.dash_vpp.cget('text')}  |  Pa: {self.dash_pa.cget('text')}\n"
-                    f"[Results]  SPL: {self.dash_spl.cget('text')}  |  {self.dash_sl.cget('text')}\n"
-                    f"[Results]  SNR: {self.dash_snr.cget('text')}  |  ToF Dist: {self.dash_dist.cget('text')}\n"
-                    f"[Results]  {self.dash_thd.cget('text')}  |  {self.dash_tau.cget('text')}\n\n"
-                    
-                    f"--- RESONANCE SWEEP ---\n"
-                    f"[Settings] Wave: {self.sweep_wave.get()} | Drive: {self.sweep_voltage.get()} V | Meas: {self.sweep_meas.get()} | Dwell: {self.sweep_dwell.get()}s\n"
-                    f"[Settings] Range: {self.start_f.get()} to {self.end_f.get()} kHz | Step: {self.step_f.get()} kHz ({self.sweep_spacing.get()})\n"
-                    f"[Results]  Peak: {self.dash_peak_f.cget('text')}  |  BW: {self.dash_bw.cget('text')}  |  Q: {self.dash_q.cget('text')}\n\n"
-                    
-                    f"--- POLAR PLOT ---\n"
-                    f"[Settings] Wave: {self.polar_wave.get()} | Drive: {self.pol_f.get()} kHz, {self.polar_voltage.get()} V | Dwell: {self.pol_dwell.get()}s\n"
-                    f"[Settings] Range: {self.pol_start.get()}° to {self.pol_end.get()}° | Step: {self.pol_step.get()}° ({self.pol_dir.get()})\n"
-                    f"[Theoretical] Shape: {self.pred_geom.get()} | Dimension: {self.pred_dim.get()} mm | Mode: ({self.pred_mode_n.get()},{self.pred_mode_m.get()})\n"
-                    f"[Results]  -3dB: {self.dash_bw3.cget('text')}  |  -6dB: {self.dash_bw6.cget('text')}\n\n"
-                    
-                    f"--- ADVANCED TIMING & IMPEDANCE ---\n"
-                    f"[Wavelet]  Drive: {self.cwt_f.get()} kHz, {self.cwt_voltage.get()} V, {self.cwt_cycles.get()} Cycles ({self.cwt_wave.get()})\n"
-                    f"[STFT]     Drive: {self.adv_f.get()} kHz, {self.adv_voltage.get()} V, {self.adv_cycles.get()} Cycles ({self.adv_wave.get()})\n"
-                    f"[Impedance] Imported CSVs: {imp_files}\n"
-                    f"{'='*50}\n")
-                    
+
+        # Save plots first so the PDF report can reference them by filename
         if save_plots:
             try:
                 plots_to_save = [
@@ -2608,12 +3174,22 @@ class AirAcousticsSuite(ctk.CTk):
                         fig.tight_layout()
                         fig.canvas.draw_idle()
             except Exception as e: self.log(f"Plot export err: {e}")
+
+        html = self._build_html_report(name, ts, has_plots=save_plots)
+        with open(sd / "Full_Lab_Report.html", 'w', encoding='utf-8') as f:
+            f.write(html)
             
         if save_csvs:
             try:
                 if self.last_burst_t is not None: np.savetxt(sd/"Data_Burst.csv", np.column_stack((self.last_burst_t, self.last_burst_tx, self.last_burst_mic)), delimiter=",", header="Time_s,TX_V,RX_V", comments='')
+                if self.last_burst_fft_f is not None: np.savetxt(sd/"Data_FFT.csv", np.column_stack((self.last_burst_fft_f, self.last_burst_fft_m)), delimiter=",", header="Freq_Hz,Magnitude", comments='')
                 if self.last_sweep_data is not None: np.savetxt(sd/"Data_Sweep.csv", self.last_sweep_data, delimiter=",", header="Freq_kHz,V_rms,Pa_rms,SPL_dB", comments='')
-                if self.last_polar_data is not None: np.savetxt(sd/"Data_Polar.csv", self.last_polar_data, delimiter=",", header="Angle_rad,Mag_dBnorm", comments='')
+                if self.last_polar_raw  is not None:
+                    np.savetxt(sd/"Data_Polar.csv",  self.last_polar_raw,  delimiter=",", header="Angle_deg,V_rms", comments='')
+                    if self.last_polar_bw3 is not None:
+                        np.savetxt(sd/"Data_Polar_BW.csv", np.array([[3.0, self.last_polar_bw3],[6.0, self.last_polar_bw6]]), delimiter=",", header="Threshold_dB,Beamwidth_deg", comments='')
+                if self.last_adv_raw   is not None: np.savetxt(sd/"Data_STFT.csv",   self.last_adv_raw,    delimiter=",", header="Time_s,RX_V",         comments='')
+                if self.last_cwt_raw   is not None: np.savetxt(sd/"Data_CWT.csv",    self.last_cwt_raw,    delimiter=",", header="Time_s,RX_V",         comments='')
                 if hasattr(self, 'imp_data') and self.imp_data:
                     for imp_name, (f_data, z_data, p_data) in self.imp_data.items():
                         np.savetxt(sd / f"Impedance_{imp_name}.csv", np.column_stack((f_data, z_data, p_data)), delimiter=",", header="Frequency_Hz,Z_Ohm,Phase_deg", comments='')
@@ -2639,16 +3215,34 @@ class AirAcousticsSuite(ctk.CTk):
             self.last_burst_t = state.get('last_burst_t'); self.last_burst_tx = state.get('last_burst_tx'); self.last_burst_mic = state.get('last_burst_mic')
             self._last_burst_pre_list = state.get('_last_burst_pre_list'); self.last_sweep_data = state.get('last_sweep_data')
             self.last_polar_data = state.get('last_polar_data'); self.last_adv_raw = state.get('last_adv_raw')
-            self.last_cwt_raw = state.get('last_cwt_raw'); self._polar_overlays = state.get('_polar_overlays', [])
+            self.last_cwt_raw = state.get('last_cwt_raw')
+            self._polar_overlays = state.get('_polar_overlays', [])
+            self._sweep_overlays = state.get('_sweep_overlays', [])
             if 'imp_data' in state:
                 self.imp_data = state['imp_data']
                 self.update_imp_listbox(); self.update_imp_plot()
             if state.get('burst_kwargs'): self.update_burst_ui(**state['burst_kwargs'])
+            if state.get('sw_bw_kwargs') and 'bw3' in state['sw_bw_kwargs']:
+                state['sw_bw_kwargs']['bw_val'] = state['sw_bw_kwargs'].pop('bw3')
+                state['sw_bw_kwargs']['bw_label'] = '-3 dB'  # ensure gauge formula matches bw_val
             if state.get('sw_bw_kwargs') and self.last_sweep_data is not None:
-                sd = self.last_sweep_data; yaxis = self.sweep_yaxis.get()
-                y_idx = {"SPL (dB)": 3, "Pa RMS": 2, "V RMS": 1}.get(yaxis, 3)
-                self.update_sw_plot(sd[:, 0], sd[:, y_idx], yaxis); self.update_sw_bw_plot(**state['sw_bw_kwargs'])
-            if state.get('polar_kwargs'): self.update_polar_ui(**state['polar_kwargs'])
+                # Redraw overlays from saved state without modifying the list
+                if self._sweep_overlays:
+                    self._redraw_sw_overlays()
+                else:
+                    sd = self.last_sweep_data; yaxis = self.sweep_yaxis.get()
+                    y_idx = {"SPL (dB)": 3, "Pa RMS": 2, "V RMS": 1}.get(yaxis, 3)
+                    self._sweep_overlays = [(list(sd[:, 0]), list(sd[:, y_idx]), yaxis)]
+                    self._redraw_sw_overlays()
+                self.update_sw_bw_plot(**state['sw_bw_kwargs'])
+            if state.get('polar_kwargs'):
+                self.update_polar_ui(**state['polar_kwargs'])
+            elif self.last_polar_data is not None:
+                # Reconstruct from stored dB-normalised data for old .aas files
+                al = list(self.last_polar_data[:, 0])
+                vl = [10 ** (d / 20.0) for d in self.last_polar_data[:, 1]]
+                pol_min = int(float(self.pol_range.get()))
+                self.update_polar_ui(al, vl, pol_min)
             if state.get('adv_kwargs'): self.update_adv_ui(**state['adv_kwargs'])
             if state.get('cwt_kwargs'): self.update_cwt_ui(**state['cwt_kwargs'])
             self.log(f"Successfully loaded interactive data from: {os.path.basename(filepath)}")
